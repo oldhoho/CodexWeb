@@ -1870,15 +1870,33 @@ async function pollHistory(){
 // Shared config (favorites / work modes / prompts) is polled independently of
 // the conversation poll, so settings edits on the launcher show up even when
 // this tab is sitting on a non-chat tool.
+// Repaint mode/prompt panels without clobbering a field the user is typing in.
+// Snapshot the focused input, render, then restore its value + caret.
+function safeRepaintSettings(){
+  const ae=document.activeElement;
+  const focusId=ae?ae.id:"";
+  const editing=/^(cfgName|cfgDesc|promptName|promptText)$/.test(focusId);
+  const keep=editing?{id:focusId,value:ae.value,start:ae.selectionStart,end:ae.selectionEnd}:null;
+  renderMode(); renderPrompts();
+  if (keep){
+    const el=document.getElementById(keep.id);
+    if (el){
+      el.value=keep.value;
+      try{ el.setSelectionRange(keep.start, keep.end); }catch(e){}
+      el.focus();
+    }
+  }
+}
 async function pollSharedConfig(){
   try{
     const r=await api("GET","/api/config");
     const rev=Number(r.rev)||0;
     if (rev===cfgState.rev) return;
     cfgState={rev, config:(r.config && typeof r.config==="object") ? r.config : {}};
-    const editing = /^(cfgName|cfgDesc|promptName|promptText)$/.test(document.activeElement?.id||"");
+    // A focused settings input must not block the whole repaint: the mode
+    // buttons (whose labels ARE the editable names) live in renderMode too.
     await applySharedConfig(false);
-    if (!editing){ renderMode(); renderPrompts(); }
+    safeRepaintSettings();
     refreshFavButtons(); renderFavPanel();
   }catch(e){ /* transient/offline: keep current UI */ }
 }
@@ -1887,6 +1905,9 @@ function startVisibilityPolling(){
   setInterval(()=>{ pollSharedConfig(); if (!chatVisible()) return; pollSessionMeta(); pollHistory(); }, VIS_POLL_MS);
   document.addEventListener("visibilitychange", ()=>{
     if (document.visibilityState!=="visible") return;
+    // Always repaint settings on resume, even if rev is unchanged: an earlier
+    // edit-time skip could have left the mode labels stale.
+    safeRepaintSettings();
     pollSharedConfig();
     if (chatVisible()){ pollSessionMeta(); pollHistory(); }   // catch up immediately on resume
   });
