@@ -285,8 +285,6 @@ svg{display:block;flex-shrink:0}
 .modeEditFoot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:6px 14px 2px}
 .modeEditFoot .hint{margin-right:auto}
 .modeEditFoot .btn{font-size:11px;padding:4px 10px}
-.modeCfgLink{margin-left:2px;border:none;background:none;color:var(--brand-text);font-size:10.5px;font-weight:600;cursor:pointer;white-space:nowrap}
-.modeCfgLink:hover{text-decoration:underline}
 /* prompts page: unified mode + prompt configuration */
 .modeWrap{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:4px 0 2px}
 .modeWrap .modeSeg{background:var(--selector)}
@@ -727,7 +725,6 @@ svg{display:block;flex-shrink:0}
                 <button data-mode="device">手机控制</button>
                 <button data-mode="custom">自定义</button>
               </div>
-              <button class="modeCfgLink" id="modeCfgLink" style="display:none" title="自定义选项在提示词库配置">自定义选项 → 提示词库</button>
             </div>
             <div class="attachTray" id="attachTray"></div>
             <textarea class="ta" id="prompt" rows="1" placeholder="发消息…" title="Enter 发送，Shift+Enter 换行"></textarea>
@@ -2013,7 +2010,6 @@ function renderMode(){
   const modeDesc=(cfg.name||modeLabel(workMode))+" · "+(cfg.desc||MODE_LABEL_FALLBACK[workMode]||"");
   $("modeCaption").textContent=modeDesc+adjusted;
   $("promptModeDesc").textContent=modeDesc+" · 推理 "+(EFFORT_LABEL[cfg.effort]||cfg.effort);
-  $("modeCfgLink").style.display = "";
   // Composer toggles are real buttons: clicking overrides the preset for this
   // session only. They work in pure-chat too (as an explicit instruction).
   $("tglThink").classList.toggle("on", !!eff.think);
@@ -2026,7 +2022,6 @@ function renderMode(){
 ["#modeSeg","#promptModeSeg"].forEach(sel=>{
   document.querySelectorAll(sel+" button").forEach(b=>{ b.onclick=()=>setWorkMode(b.dataset.mode); });
 });
-$("modeCfgLink").onclick=()=>switchTool("prompts");
 $("modeResetBtn").onclick=resetModeDefs;
 function editMode(f, v){ modeCfg()[f]=v; saveModeDefs(); renderMode(); }
 $("cfgName").oninput=()=>editMode("name", $("cfgName").value.trim()||MODE_DEFAULTS[workMode].name);
