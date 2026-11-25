@@ -276,6 +276,15 @@ svg{display:block;flex-shrink:0}
 .customBar select{border:1px solid var(--border-l2);border-radius:6px;background:var(--input);color:var(--label-1);
   font-size:11.5px;padding:2px 6px}
 .customBar .ck input{accent-color:var(--brand)}
+#cfgPromptIdWrap{display:none}
+#cfgPromptIdWrap.on{display:inline-flex}
+/* editable name/description + footer row for the mode editor */
+.modeEditGrid{display:grid;grid-template-columns:190px 1fr;gap:10px;margin:10px 12px 2px}
+.modeEditGrid label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--label-2)}
+.modeEditGrid .field{width:100%}
+.modeEditFoot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:6px 14px 2px}
+.modeEditFoot .hint{margin-right:auto}
+.modeEditFoot .btn{font-size:11px;padding:4px 10px}
 .modeCfgLink{margin-left:2px;border:none;background:none;color:var(--brand-text);font-size:10.5px;font-weight:600;cursor:pointer;white-space:nowrap}
 .modeCfgLink:hover{text-decoration:underline}
 /* prompts page: unified mode + prompt configuration */
@@ -584,8 +593,10 @@ svg{display:block;flex-shrink:0}
   .reviewTurn .rtHead .rtbadge{margin-left:0}
   .modeSeg{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;flex-wrap:nowrap;scrollbar-width:none}
   .modeSeg::-webkit-scrollbar{display:none}
-  .modeSeg button{flex:1 0 auto}
+  .modeSeg button{flex:1 0 auto;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .customBar{gap:8px 12px}
+  .modeEditGrid{grid-template-columns:1fr;margin:10px 12px 2px}
+  .modeEditFoot{margin:6px 12px 2px}
   .toolRow{flex-wrap:wrap;gap:6px 10px}
   .toolRow .tname{min-width:0}
   .toolRow .tdesc{flex:1 1 100%;order:3}
@@ -710,11 +721,11 @@ svg{display:block;flex-shrink:0}
                 <span class="usageChip" id="usageChip" title="点击查看本会话用量明细">—</span>
               </div>
               <div class="modeSeg" id="modeSeg">
-                <button data-mode="full" title="全能：全部工具 + 高强度推理">全能</button>
-                <button data-mode="lite" title="轻量：基础工具 + 低推理">轻量</button>
-                <button data-mode="chat" title="纯对话：极简直连 API，零系统提示/零工具，最省 Token">纯对话</button>
-                <button data-mode="device" title="手机控制：用已保存的技能模块编排流程，确定性执行（不能自由操控）">手机控制</button>
-                <button data-mode="custom" title="自定义：在提示词库逐项配置">自定义</button>
+                <button data-mode="full">全能</button>
+                <button data-mode="lite">轻量</button>
+                <button data-mode="chat">纯对话</button>
+                <button data-mode="device">手机控制</button>
+                <button data-mode="custom">自定义</button>
               </div>
               <button class="modeCfgLink" id="modeCfgLink" style="display:none" title="自定义选项在提示词库配置">自定义选项 → 提示词库</button>
             </div>
@@ -875,42 +886,44 @@ svg{display:block;flex-shrink:0}
           <h2>提示词与工作模式</h2><p>这里统一配置「发什么指令」和「怎么思考」。工作模式决定推理强度与各类指令开关，系统词预设决定注入的角色内容，二者共同影响每条发送给 Codex 的消息。</p>
         </div></div>
         <div class="panel"><h3>工作模式</h3>
-          <p>四种模式预设了不同的推理强度与指令组合；选「自定义」后可在下方逐项调整。切换会立即生效并保存在本机。</p>
+          <p>五个模式的名称与全部配置都能自定义，改动立即生效并保存在本机。选中一个模式，在下方改它的名字、说明、推理强度、思考/搜索/系统词开关，以及它携带的系统词预设；不同会话仍各自记住当前模式。</p>
           <div class="modeWrap">
             <div class="modeSeg" id="promptModeSeg">
-              <button data-mode="full" title="全能：全部工具 + 高强度推理">全能</button>
-              <button data-mode="lite" title="轻量：基础工具 + 低推理">轻量</button>
-              <button data-mode="chat" title="纯对话：极简直连 API，零系统提示/零工具，最省 Token">纯对话</button>
-              <button data-mode="device" title="手机控制：从技能模块编排流程，不能自由操控手机">手机控制</button>
-              <button data-mode="custom" title="自定义：逐项选择">自定义</button>
+              <button data-mode="full">全能</button>
+              <button data-mode="lite">轻量</button>
+              <button data-mode="chat">纯对话</button>
+              <button data-mode="device">手机控制</button>
+              <button data-mode="custom">自定义</button>
             </div>
             <span class="modeDesc" id="promptModeDesc"></span>
+          </div>
+          <div class="modeEditGrid">
+            <label>模式名称 <input class="field" id="cfgName" maxlength="12" placeholder="显示在工作模式条上"></label>
+            <label>模式说明 <input class="field" id="cfgDesc" maxlength="60" placeholder="一句话描述这个模式"></label>
           </div>
           <div class="customBar" id="promptCustomBar">
             <label>推理强度 <select id="cfgEffort"><option value="minimal">极简</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
             <label class="ck"><input type="checkbox" id="cfgThink"> 深度思考指令</label>
             <label class="ck"><input type="checkbox" id="cfgSearch"> 联网检索指令</label>
             <label class="ck"><input type="checkbox" id="cfgPrompt"> 注入系统词</label>
-            <span class="hint" id="customHint" style="margin-left:auto"></span>
+            <label id="cfgPromptIdWrap">携带系统词 <select id="cfgPromptId"></select></label>
           </div>
-          <div class="note">工作模式与系统词的关系：<b>工作模式的「注入系统词」开关</b>是总闸门——关闭时（如纯对话模式）无论下方注入范围如何设置都不会注入；开启时，才按下方「发送时注入」的选择把系统词加到消息前。深度思考 / 联网检索两个开关同样由工作模式决定。</div>
+          <div class="modeEditFoot">
+            <span class="hint" id="customHint"></span>
+            <button class="btn" id="modeResetBtn">恢复默认模式</button>
+          </div>
+          <div class="note" id="modeNote">勾选「注入系统词」后，用「携带系统词」下拉选一份预设，该模式发送时就会把这份系统词加到消息前——不再需要全局/本会话的额外设置。<b>系统词</b>在此统一管理（左侧列表），本模式只是引用其中一份。<b>纯对话</b>默认不注入；你可为它单独勾选并指定，但会失去"零行李"的省 Token 优势。</div>
         </div>
         <div class="promptLayout">
           <div class="promptList"><div class="navLabel">系统词预设</div><div class="promptItems" id="promptItems"></div>
             <button class="btn" id="promptAdd" style="margin-top:8px"><svg class="ic" style="display:inline;width:14px;height:14px;vertical-align:-2px"><use href="#i-plus"/></svg> 新建预设</button>
           </div>
           <div class="promptEdit">
-            <div class="injectBar"><span class="injectLabel">发送时注入</span>
-              <div class="seg" id="injectSeg">
-                <button data-mode="off">关闭</button><button data-mode="global">全局</button><button data-mode="session">本会话</button>
-              </div>
-            </div>
             <div class="injectHint" id="injectHint"></div>
             <input class="field" id="promptName" placeholder="预设名称" style="margin-top:10px">
             <textarea id="promptText" spellcheck="false" placeholder="在这里编写系统词 / 角色设定…"></textarea>
-            <div class="rowBtns"><button class="btn primary" id="promptSave">保存预设</button><button class="btn" id="promptCopy">复制系统词</button><button class="btn danger" id="promptDel">删除</button>
-              <button class="btn" id="promptBindBtn">绑定到本会话</button></div>
-            <div class="note" id="promptNote">预设保存在本机浏览器，不会上传。<b>全局</b>：所有对话都注入当前选中的预设；<b>本会话</b>：仅当前会话注入你绑定的预设（不同会话可绑定不同角色）；<b>关闭</b>：不注入。只有当工作模式允许注入系统词时，这里的选择才会生效。</div>
+            <div class="rowBtns"><button class="btn primary" id="promptSave">保存预设</button><button class="btn" id="promptCopy">复制系统词</button><button class="btn danger" id="promptDel">删除</button></div>
+            <div class="note" id="promptNote">预设保存在本机浏览器，不会上传。在上方「携带系统词」里把某份预设指定给当前工作模式即可注入；同一份预设可被多个模式共用，改一处全部生效。</div>
           </div>
         </div>
       </div></div></section>
@@ -1053,27 +1066,72 @@ function favIdSet(){ return new Set(favList().map(f=>f && f.id).filter(Boolean))
 // full-capabilities toggles (mirrored from backend caps.json)
 let caps = {memory:true, compact:true, auto_title:true, smart_mode:true};
 async function loadCaps(){ try{ const r=await api("GET","/api/capabilities"); caps=r.caps||caps; }catch(e){} return caps; }
-// work mode: full | lite | chat | custom. Custom has its own persisted config.
+// Work modes. Internal KEYS are stable and fixed (backend routes on them:
+// chat = direct API, device = skill orchestration, everything else = Codex CLI,
+// and session meta.json validates against this set). Everything ELSE about a
+// mode — its display name, description, effort, think/search/inject switches and
+// the system prompt it carries — is user-editable and persisted in modeDefs.
 const MODE_DEFAULTS = {
-  full:   {effort:"high",    think:true,  search:true,  prompt:true,  label:"全能模式 · 全部能力（工具 + 高推理）"},
-  lite:   {effort:"low",     think:false, search:false, prompt:true,  label:"轻量模式 · 基础工具（低推理）"},
-  chat:   {effort:"minimal", think:false, search:false, prompt:false, label:"纯对话 · 极简直连（零行李、零工具）"},
-  device: {effort:"minimal", think:false, search:false, prompt:false, label:"手机控制 · 技能模块编排（自由操控已禁用）"},
-  custom: {effort:"medium",  think:false, search:false, prompt:true,  label:"自定义模式"},
+  full:   {name:"全能",   effort:"high",    think:true,  search:true,  prompt:true},
+  lite:   {name:"轻量",   effort:"low",     think:false, search:false, prompt:true},
+  chat:   {name:"纯对话", effort:"minimal", think:false, search:false, prompt:false},
+  device: {name:"手机控制", effort:"minimal", think:false, search:false, prompt:false},
+  custom: {name:"自定义", effort:"medium",  think:false, search:false, prompt:true},
 };
+const MODE_LABEL_FALLBACK = {
+  full:"全部工具 + 高强度推理", lite:"基础工具 + 低推理",
+  chat:"极简直连 API，零系统提示/零工具，最省 Token",
+  device:"从技能模块编排流程，不能自由操控手机", custom:"自定义选项",
+};
+// modeDefs[key] = {name, desc, effort, think, search, prompt, promptId}
+//   promptId = id of the system-prompt preset this mode carries; "" = none.
+const MODE_FIELDS = ["name","desc","effort","think","search","prompt","promptId"];
+function freshModeDefs(){
+  const out={};
+  for (const k in MODE_DEFAULTS){
+    out[k] = Object.assign({desc:MODE_LABEL_FALLBACK[k], promptId:""}, MODE_DEFAULTS[k]);
+  }
+  return out;
+}
+let modeDefs = freshModeDefs();
+try{
+  const saved = JSON.parse(localStorage.getItem("cx.modeDefs")||"null");
+  if (saved){
+    for (const k in MODE_DEFAULTS){
+      if (!saved[k]) continue;
+      for (const f of MODE_FIELDS){
+        if (saved[k][f] !== undefined) modeDefs[k][f] = saved[k][f];
+      }
+    }
+  } else {
+    // Migrate the legacy single customCfg into the custom slot.
+    const old = JSON.parse(localStorage.getItem("cx.customCfg")||"null");
+    if (old) for (const f of ["effort","think","search","prompt"]) if (old[f]!==undefined) modeDefs.custom[f]=old[f];
+    // Migrate the legacy injectMode: global -> bind active prompt to all
+    // prompt-enabled modes; session -> bind only to the remembered bind set.
+    const oldInject = localStorage.getItem("cx.injectMode")||"off";
+    const active = localStorage.getItem("cx.promptActive")||"";
+    if (oldInject!=="off" && active){
+      if (oldInject==="global") for (const k in modeDefs) if (modeDefs[k].prompt) modeDefs[k].promptId=active;
+      else {
+        let binds={}; try{ binds=JSON.parse(localStorage.getItem("cx.promptBind")||"{}")||{}; }catch(e){}
+        for (const sid in binds) { /* session binds have no mode; keep them accessible via promptList */ }
+      }
+    }
+  }
+}catch(e){}
+function saveModeDefs(){ try{ localStorage.setItem("cx.modeDefs",JSON.stringify(modeDefs)); }catch(e){} }
+function resetModeDefs(){
+  if (!confirm("把所有工作模式恢复为出厂默认？名称、说明、开关和系统词绑定都会还原（提示词库不受影响）。")) return;
+  modeDefs = freshModeDefs(); saveModeDefs(); renderMode(); renderPrompts();
+  toast("工作模式已恢复默认");
+}
 // New installs start in pure-chat (lean, direct API). Per-session mode is
 // remembered in meta.json and restored on open; the global value is the fallback.
 let workMode = localStorage.getItem("cx.workMode") || "chat";
 if (!MODE_DEFAULTS[workMode]) workMode = "chat";
-let customCfg = MODE_DEFAULTS.custom;
-try{ customCfg = Object.assign({}, MODE_DEFAULTS.custom,
-       JSON.parse(localStorage.getItem("cx.customCfg")||"{}")); }catch(e){}
 // running token usage accumulator (for the usage chip / review)
 let usageTotals = {input:0, cached:0, output:0, turns:0};
-// prompt injection: off | global | session (bound per-session via cx.promptBind)
-let injectMode = localStorage.getItem("cx.injectMode") || "off";
-let promptBind = {};
-try{ promptBind = JSON.parse(localStorage.getItem("cx.promptBind")||"{}") || {}; }catch(e){ promptBind = {}; }
 // terminal state
 let termHistory = [], termHistIdx = 0, termBusy = false;
 
@@ -1813,7 +1871,8 @@ async function maybeSuggestMode(){
   }catch(e){ /* suggestion is best-effort */ }
 }
 // ---- work modes + per-session quick overrides ----
-function modeCfg(){ return workMode==="custom" ? customCfg : MODE_DEFAULTS[workMode]; }
+function modeCfg(){ return modeDefs[workMode] || modeDefs.custom; }
+function modeLabel(k){ const d=modeDefs[k]; return d && d.name ? d.name : (MODE_DEFAULTS[k]?MODE_DEFAULTS[k].name:k); }
 function effectiveModeCfg(){
   const base=modeCfg();
   return Object.assign({}, base, {
@@ -1837,7 +1896,7 @@ function setWorkMode(mode, quiet){
   localStorage.removeItem(quickKey("think")); localStorage.removeItem(quickKey("search"));
   const cached=(sessionsCache||[]).find(x=>x.id===session);
   if (cached){ cached.think=null; cached.search=null; }
-  renderMode(); if(!quiet) toast("已切换："+MODE_DEFAULTS[workMode].label);
+  renderMode(); if(!quiet) toast("已切换："+modeLabel(workMode));
   if (session) updateSessionMeta(session,{mode:mode, think:null, search:null});
 }
 function toggleQuick(kind){
@@ -1849,21 +1908,38 @@ function toggleQuick(kind){
   toast((next?"已开启":"已关闭")+"「"+(kind==="think"?"深度思考":"智能搜索")+"」"+(session?"（仅本会话）":""));
 }
 const EFFORT_LABEL={minimal:"极简",low:"低",medium:"中",high:"高"};
+function renderPromptIdOptions(){
+  const sel=$("cfgPromptId"); if(!sel) return;
+  const keep=modeCfg().promptId||"";
+  sel.innerHTML='<option value="">（不注入）</option>'+promptList.map(p=>
+    '<option value="'+esc(p.id)+'">'+esc(p.name||"未命名")+'</option>').join("");
+  sel.value=keep;
+  if (!sel.value && keep) sel.value="";  // dangling id -> none
+}
 function renderMode(){
-  // both mode switches (chat bar + prompts page) stay in sync
-  document.querySelectorAll("#modeSeg button, #promptModeSeg button").forEach(b=>b.classList.toggle("on", b.dataset.mode===workMode));
-  const cfg=modeCfg(), eff=effectiveModeCfg(), isCustom=workMode==="custom";
+  const cfg=modeCfg(), eff=effectiveModeCfg();
+  // both mode switches (chat bar + prompts page) stay in sync; names are editable
+  document.querySelectorAll("#modeSeg button, #promptModeSeg button").forEach(b=>{
+    const k=b.dataset.mode, d=modeDefs[k];
+    b.classList.toggle("on", k===workMode);
+    const nm=(d&&d.name)?d.name:modeLabel(k);
+    if (b.textContent!==nm) b.textContent=nm;
+    b.title=nm+"："+((d&&d.desc)||MODE_LABEL_FALLBACK[k]||"");
+  });
+  // all fields editable for whichever mode is selected
+  $("cfgName").value=cfg.name||"";
+  $("cfgDesc").value=cfg.desc||"";
   $("cfgEffort").value=cfg.effort; $("cfgThink").checked=!!cfg.think;
   $("cfgSearch").checked=!!cfg.search; $("cfgPrompt").checked=!!cfg.prompt;
-  // custom options editable only in custom mode; elsewhere show read-only preset values
-  const bar=$("promptCustomBar");
-  bar.querySelectorAll("select,input").forEach(el=>el.disabled=!isCustom);
-  bar.style.opacity = isCustom ? "1" : ".62";
-  $("customHint").textContent = isCustom ? "↑ 仅自定义模式可修改，改动自动保存" : "↑ 由当前模式预设决定；要修改请选「自定义」";
-  const adjusted=(quickThink!==null||quickSearch!==null)?" · 已手动调整":"";
-  $("modeCaption").textContent = MODE_DEFAULTS[workMode].label+adjusted;
-  $("promptModeDesc").textContent = MODE_DEFAULTS[workMode].label+" · 推理 "+(EFFORT_LABEL[cfg.effort]||cfg.effort);
-  $("modeCfgLink").style.display = isCustom ? "" : "none";
+  renderPromptIdOptions();
+  $("cfgPromptIdWrap").classList.toggle("on", !!cfg.prompt);
+  $("cfgPromptId").disabled=!cfg.prompt;
+  $("customHint").textContent="↑ 正在编辑「"+(cfg.name||modeLabel(workMode))+"」模式，改动自动保存";
+  const adjusted=(quickThink!==null||quickSearch!==null)?" · 本会话已手动调整":"";
+  const modeDesc=(cfg.name||modeLabel(workMode))+" · "+(cfg.desc||MODE_LABEL_FALLBACK[workMode]||"");
+  $("modeCaption").textContent=modeDesc+adjusted;
+  $("promptModeDesc").textContent=modeDesc+" · 推理 "+(EFFORT_LABEL[cfg.effort]||cfg.effort);
+  $("modeCfgLink").style.display = "";
   // Composer toggles are real buttons: clicking overrides the preset for this
   // session only. They work in pure-chat too (as an explicit instruction).
   $("tglThink").classList.toggle("on", !!eff.think);
@@ -1877,20 +1953,23 @@ function renderMode(){
   document.querySelectorAll(sel+" button").forEach(b=>{ b.onclick=()=>setWorkMode(b.dataset.mode); });
 });
 $("modeCfgLink").onclick=()=>switchTool("prompts");
-$("cfgEffort").onchange=()=>{ if(workMode!=="custom")return; customCfg.effort=$("cfgEffort").value; saveCustom(); renderMode(); };
-$("cfgThink").onchange=()=>{ if(workMode!=="custom")return; customCfg.think=$("cfgThink").checked; saveCustom(); renderMode(); };
-$("cfgSearch").onchange=()=>{ if(workMode!=="custom")return; customCfg.search=$("cfgSearch").checked; saveCustom(); renderMode(); };
-$("cfgPrompt").onchange=()=>{ if(workMode!=="custom")return; customCfg.prompt=$("cfgPrompt").checked; saveCustom(); renderMode(); };
-function saveCustom(){ localStorage.setItem("cx.customCfg",JSON.stringify(customCfg)); }
+$("modeResetBtn").onclick=resetModeDefs;
+function editMode(f, v){ modeCfg()[f]=v; saveModeDefs(); renderMode(); }
+$("cfgName").oninput=()=>editMode("name", $("cfgName").value.trim()||MODE_DEFAULTS[workMode].name);
+$("cfgDesc").oninput=()=>editMode("desc", $("cfgDesc").value.trim());
+$("cfgEffort").onchange=()=>editMode("effort", $("cfgEffort").value);
+$("cfgThink").onchange=()=>editMode("think", $("cfgThink").checked);
+$("cfgSearch").onchange=()=>editMode("search", $("cfgSearch").checked);
+$("cfgPrompt").onchange=()=>editMode("prompt", $("cfgPrompt").checked);
+$("cfgPromptId").onchange=()=>editMode("promptId", $("cfgPromptId").value);
 $("usageChip").onclick=()=>switchTool("review");
 
-// Resolve which system prompt (if any) is prepended to this turn. Gated by the
-// active work mode's `prompt` switch so 纯对话 mode truly sends zero extras.
+// Resolve which system prompt this mode carries. No global/session layers:
+// the active mode's `prompt` switch + `promptId` fully decide injection.
 function effectiveSystemPrompt(){
-  if (!modeCfg().prompt || injectMode === "off") return "";
-  let p = null;
-  if (injectMode === "session") p = promptList.find(x=>x.id===promptBind[session]);
-  else p = currentPrompt();
+  const cfg=modeCfg();
+  if (!cfg.prompt || !cfg.promptId) return "";
+  const p = (promptList||[]).find(x=>x.id===cfg.promptId);
   return p && p.text && p.text.trim() ? p.text.trim() : "";
 }
 // Refresh the live API status (never echoes the key). `probe=true` also does a
@@ -1972,22 +2051,21 @@ async function send(){
   const injections = [];   // logged for the context-review view
   const thinkText = "请进行充分、逐步的深入分析，展示你的思考过程与依据。";
   const searchText = "请尽可能利用可用工具联网检索最新信息并注明来源，再作答。";
+  // System prompt is carried by the mode itself. It applies to ALL modes —
+  // including 纯对话 — but only when the user explicitly enabled it on that
+  // mode and picked a preset. By default 纯对话 carries nothing (zero luggage).
+  const sys = effectiveSystemPrompt();
+  if (sys){ out = "[系统指令 / 角色设定]\n" + sys + "\n\n[用户请求]\n" + out;
+    injections.push({kind:"系统词 / 角色设定", text:sys}); }
   if (isPlain){
-    // Both plain modes send only the user's text; no system-word injection.
-    // Device mode additionally gets a server-side planner prompt listing the
-    // user's skill modules -- the model never sees raw shell / cxdevice.
+    // Plain modes use the provider's REAL server-side capabilities: the
+    // `think`/`search` booleans become `thinking` + the web-search tool. The
+    // entries below are honest audit notes, not fake text injections.
     if (workMode==="chat"){
-      // Pure chat now uses DeepSeek's REAL server-side capabilities: the
-      // `think`/`search` booleans (sent above) become `thinking` + the
-      // deepseek_web_search tool in the API request. No fake text injection.
-      // These entries are just an honest audit note for the review page.
       if (cfg.think) injections.push({kind:"深度思考", text:"已启用服务端深度思考（thinking 参数），模型先推理再作答。"});
       if (cfg.search) injections.push({kind:"智能搜索", text:"已启用服务端联网搜索（deepseek_web_search 工具，搜索在 DeepSeek 服务器执行，无需本机访问外网）。"});
     }
   } else {
-    const sys = effectiveSystemPrompt();
-    if (sys){ out = "[系统指令 / 角色设定]\n" + sys + "\n\n[用户请求]\n" + out;
-      injections.push({kind:"系统词 / 角色设定", text:sys}); }
     if (cfg.think){ out = "[推理要求] " + thinkText + "\n\n" + out;
       injections.push({kind:"深度思考指令", text:thinkText}); }
     if (cfg.search){ out = "[联网要求] " + searchText + "\n\n" + out;
@@ -2187,7 +2265,7 @@ function renderSearchResults(results, query){
     const b=document.createElement("button"); b.type="button"; b.className="searchItem";
     const where=(r.matched_in||[]).join(" · ");
     b.innerHTML='<div class="r1"><span class="rt">'+searchHL(r.title||r.id,query)+
-      '</span><span class="rm">'+esc(r.mode||"chat")+'</span></div>'+
+      '</span><span class="rm">'+esc(modeLabel(r.mode||"chat"))+'</span></div>'+
       '<div class="r2">'+esc(r.id)+(r.group?" · "+searchHL(r.group,query):"")+
       " · "+fmtTime(r.mtime)+(where?" · 命中 "+esc(where):"")+"</div>"+
       (r.snippet?'<div class="sn">'+searchHL(r.snippet,query)+"</div>":"");
@@ -2562,7 +2640,7 @@ function renderReview(){
       const head=document.createElement("div"); head.className="rtHead";
       head.innerHTML='<span class="rtn">#'+(turns.length-idx)+'</span>'+
         '<span class="rtmeta">'+new Date((t.ts||0)*1000).toLocaleString("zh-CN")+
-        ' · '+esc(t.mode||"full")+' / 推理 '+esc(t.effort||"—")+'</span>'+
+        ' · '+esc(modeLabel(t.mode||"full"))+' / 推理 '+esc(t.effort||"—")+'</span>'+
         '<span class="rtbadge">'+(res.exit==0?"成功":"退出码 "+res.exit)+'</span>'+
         '<button class="btn rtDel" title="删除这一轮对话（连同其历史记录，会影响后续上下文）" style="color:var(--err);padding:1px 8px;font-size:11px">删除本轮</button>';
       const body=document.createElement("div"); body.className="rtBody";
@@ -2636,7 +2714,7 @@ $("reviewCopyAll").onclick=async()=>{
   const r=await api("GET","/api/context?s="+encodeURIComponent(sid));
   const lines=[];
   (r.turns||[]).forEach(t=>{
-    lines.push("===== " + new Date((t.ts||0)*1000).toLocaleString("zh-CN")+" · "+(t.mode||"full")+" =====");
+    lines.push("===== " + new Date((t.ts||0)*1000).toLocaleString("zh-CN")+" · "+modeLabel(t.mode||"full")+" =====");
     lines.push("[用户输入]\n"+(t.user_input||""));
     lines.push("[实际发送]\n"+(t.effective_prompt||""));
     // Fold cumulative reasoning snapshots (see renderReview) before copying.
@@ -3224,25 +3302,19 @@ try{ promptList = JSON.parse(localStorage.getItem("cx.prompts")||"null") || DEFA
 catch(e){ promptList = DEFAULT_PROMPTS.slice(); }
 activePrompt = localStorage.getItem("cx.promptActive") || promptList[0].id;
 function currentPrompt(){ return promptList.find(p=>p.id===activePrompt) || promptList[0]; }
+// The mode itself carries its system prompt now. This hint just reports what
+// the selected mode is bound to; editing the binding happens in the mode bar.
 function renderInject(){
-  document.querySelectorAll("#injectSeg button").forEach(b=>b.classList.toggle("on", b.dataset.mode===injectMode));
-  const hint = injectMode==="off" ? "当前不注入系统词。选择「全局」或「本会话」后，发送时会自动把系统词加到 Codex 指令前。"
-    : injectMode==="global" ? "所有对话发送时都会注入当前选中预设：「"+esc(currentPrompt()?.name||"")+"」。"
-    : "仅当前会话注入绑定预设："+esc((promptList.find(p=>p.id===promptBind[session])||{}).name||"未绑定（点下方按钮绑定）")+"。";
+  const cfg=modeCfg();
+  const bound=cfg.prompt ? (promptList.find(p=>p.id===cfg.promptId)||{}).name : "";
+  const hint = !cfg.prompt
+    ? "当前模式「"+esc(cfg.name||modeLabel(workMode))+"」未开启系统词注入（纯对话默认如此，最省 Token）。"
+    : bound
+      ? "当前模式「"+esc(cfg.name||modeLabel(workMode))+"」发送时会注入系统词："+esc(bound)+"。可在上方模式配置里改选。"
+      : "当前模式已开启注入但还没选系统词，请在上方「携带系统词」里选一份预设。";
   $("injectHint").innerHTML=hint;
-  const bound = !!promptBind[session];
-  $("promptBindBtn").textContent = bound ? "更新本会话绑定" : "绑定到本会话";
+  renderPromptIdOptions();
 }
-document.querySelectorAll("#injectSeg button").forEach(b=>{
-  b.onclick=()=>{ injectMode=b.dataset.mode; localStorage.setItem("cx.injectMode",injectMode); renderInject(); toast("注入模式："+({off:"关闭",global:"全局",session:"本会话"}[injectMode])); };
-});
-$("promptBindBtn").onclick=()=>{
-  if(!session){ toast("请先创建一个会话"); return; }
-  promptBind[session]=activePrompt;
-  localStorage.setItem("cx.promptBind",JSON.stringify(promptBind));
-  injectMode="session"; localStorage.setItem("cx.injectMode","session");
-  renderInject(); toast("已把「"+currentPrompt().name+"」绑定到本会话");
-};
 function renderPrompts(){
   renderInject();
   const box=$("promptItems"); box.textContent="";
@@ -3576,17 +3648,17 @@ async function renderGuide(){
   <li>发送前会检查 API 配置；同一时间只跑一个任务，运行中可点停止（输入框旁的 ■ 或用量条里的「■ 停」）。</li>
   <li><b>失控保护</b>：运行中的用量条会实时显示耗时 / 工具步数 / Token。单条指令若连续执行 24 步工具、累计 20 万 tok 或超过 6 分钟，会自动停止以防循环消耗；过程步骤会折叠，不再刷屏。遇到复杂任务请拆成多条消息分次执行。</li>
 </ol>
-<h2>五种工作模式（能力 ↔ Token）</h2>
-<p>模式通过 <code>推理强度</code> 和注入指令的多少来真实影响消耗。纯对话每轮直连 DeepSeek，携带本会话历史；Codex 模式每轮是新进程。</p>
+<h2>五种工作模式（全部可自定义）</h2>
+<p>模式通过 <code>推理强度</code> 和注入指令的多少来真实影响消耗。纯对话每轮直连 DeepSeek，携带本会话历史；Codex 模式每轮是新进程。<b>五个模式的名称、说明、推理强度、深度思考/联网/系统词开关，以及各自携带的系统词，都能在「提示词与工作模式」页自由修改</b>，改完立即生效、自动保存在本机；只有内部标识固定（后端需要它区分直连 / 技能编排 / Codex 三条执行路径）。点「恢复默认模式」可一键还原。</p>
 <ul>
-  <li><b>全能</b>：高强度推理（high）+ 深度思考 + 联网 + 系统词 —— 极致能力，Token 最高。注意：本机国内网络无法直连外网，Codex 内置的外网抓取工具不可用；需要联网请改用纯对话 + 智能搜索。</li>
-  <li><b>轻量</b>：低推理（low）+ 系统词 —— 日常平衡。</li>
-  <li><b>纯对话</b>：极简推理（minimal→服务端 low），默认零注入、极致省 Token。顶部的<b>深度思考 / 智能搜索</b>开关是<b>真实 API 能力</b>：深度思考启用 DeepSeek 的 <code>thinking</code>（先推理再答，可展开思考过程），强度按模式映射（minimal/low→low，medium/high→high，max→max）；智能搜索启用 <code>deepseek_web_search</code> 服务端联网，搜索在 DeepSeek 服务器执行、<b>国内网络可用</b>，回答附来源引用。需官方 deepseek-flash 模型。</li>
+  <li><b>全能</b>（出厂默认）：高强度推理（high）+ 深度思考 + 联网 + 系统词 —— 极致能力，Token 最高。注意：本机国内网络无法直连外网，Codex 内置的外网抓取工具不可用；需要联网请改用纯对话 + 智能搜索。</li>
+  <li><b>轻量</b>（出厂默认）：低推理（low）+ 系统词 —— 日常平衡。</li>
+  <li><b>纯对话</b>（出厂默认）：极简推理（minimal→服务端 low），默认零注入、极致省 Token。顶部的<b>深度思考 / 智能搜索</b>开关是<b>真实 API 能力</b>：深度思考启用 DeepSeek 的 <code>thinking</code>（先推理再答，可展开思考过程），强度按模式映射（minimal/low→low，medium/high→high，max→max）；智能搜索启用 <code>deepseek_web_search</code> 服务端联网，搜索在 DeepSeek 服务器执行、<b>国内网络可用</b>，回答附来源引用。需官方 deepseek-flash 模型。你也可给它单独勾选系统词，但会失去"零行李"优势。</li>
   <li class="hint" style="list-style:none;margin-left:-18px"><b>缓存稳定性</b>：会话首次开启智能搜索后，搜索工具定义会<b>在本会话内固定保留</b>，之后关闭开关只禁用实际联网（<code>tool_choice:none</code>），不再改动提示词前缀——反复切换模式/开关不会让缓存命中归零。历史轮次的思考过程会按预算回传给 API，以满足带工具请求的多轮要求。</li>
-  <li><b>手机控制</b>：不走 Codex，也<b>不能自由操控手机</b>；用一次轻量直连调用，从你自制的技能模块里挑一个流程、填好参数，再按白名单确定性执行（详见下节）。</li>
-  <li><b>自定义</b>：逐项选择推理强度、深度思考、联网、系统词注入 —— 按需组合。</li>
+  <li><b>手机控制</b>（出厂默认）：不走 Codex，也<b>不能自由操控手机</b>；用一次轻量直连调用，从你自制的技能模块里挑一个流程、填好参数，再按白名单确定性执行（详见下节）。</li>
+  <li><b>自定义</b>（出厂默认）：逐项选择推理强度、深度思考、联网、系统词注入 —— 按需组合。你还可以把它改名成任意用途（如"写周报""审合同"），并绑定专属系统词，相当于一个自定义角色模式。</li>
 </ul>
-<p class="hint">五种模式的查看与修改统一放在「提示词与工作模式」页；对话页顶部的模式条只做快速切换。自定义选项仅在选择「自定义」模式时可编辑，其他模式显示的是该模式的预设值。Codex 自身的内置工具定义由 CLI 管理，不由本 App 注入。</p>
+<p class="hint">模式条在对话页顶部只做快速切换；改名、改配置、选系统词都在「提示词与工作模式」页完成，选中哪个模式就编辑哪个。每个模式可携带一份系统词预设（同一份预设可被多个模式共用）；不同会话仍各自记住当前模式和思考/搜索开关。Codex 自身的内置工具定义由 CLI 管理，不由本 App 注入。</p>
 <h2>用量与上下文审查</h2>
 <ul>
   <li>输入框上方「工作模式」同行显示累计 Token 与缓存命中率（点它进上下文审查）；最新一轮下方有用量卡片，列出输入/缓存命中/未命中/输出，旧轮次的卡片自动收起以节省对话空间（完整数据仍可在上下文审查逐轮查看）。</li>
@@ -3602,7 +3674,7 @@ async function renderGuide(){
 <ul>
   <li><b>终端</b>：直接在 proot 沙箱里执行 shell 命令，输出实时流式回传；长任务（如 <code>apk add</code> 拉 Java）在后台运行、不会超时，可用 ↑↓ 翻历史。工作目录锁定在当前会话，输出上限 512KB。</li>
   <li><b>工具环境</b>：抓包 / APK 页点「探测环境」列出各工具可用或缺失，<b>缺失项默认勾选</b>，按需取消后「安装勾选」，或勾选已装工具「卸载勾选」。操作后自动重新探测刷新状态。可用工具按 Alpine v3.20 仓库实际情况选取（抓包：tcpdump、dig；APK：Java、apktool、jadx）。<b>apktool 与 jadx 的官方 jar 已内置在 APK 内</b>，安装时离线复制、无需访问 GitHub；tshark / aapt / aapt2 / apksigner 在本仓库不存在，已移除以免误导。安装会自动重试 apk 数据库锁冲突（最多 4 次，间隔 2 秒），多个安装任务在后端排队，避免「Unable to lock database」；完成后<b>以重新探测结果为准</b>，探测仍缺失会明确标红，不会只报一个退出码 0。</li>
-  <li><b>系统词注入</b>：在「提示词与工作模式」页选择关闭/全局/本会话三种模式。它决定用哪份系统词；是否真正注入还取决于工作模式的「注入系统词」开关（纯对话模式强制不注入）。系统词作为指令前缀发给 Codex，不会出现在你的消息气泡里；「本会话」可为不同会话绑定不同角色预设。</li>
+  <li><b>系统词注入</b>（已简化）：系统词由<b>当前工作模式直接携带</b>——在该模式配置里勾选「注入系统词」，再用「携带系统词」下拉选一份预设即可；关闭开关即不注入。取消了旧版的"全局/本会话"多选与会话绑定，逻辑更清晰。系统词作为指令前缀随消息发送，<b>所有模式（含纯对话）都支持</b>，但只有显式勾选才注入；系统词不会出现在你的消息气泡里，可在「会话历史审查」逐轮查看。预设统一在「提示词与工作模式」页左侧管理，同一份可被多个模式共用，改一处全部生效。</li>
 </ul>
 <h2>手机控制（模块 DIY + 技能编排，免 root）</h2>
 <p><b>设计变更</b>：已取消「AI 全自动操控手机」。原先多轮视觉试探既费 Token 又难中断、风险高；现在改为<b>用户自制技能模块 + AI 一次性编排、确定性执行</b>。</p>

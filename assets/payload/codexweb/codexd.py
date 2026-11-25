@@ -1634,7 +1634,8 @@ class Runner:
         # and web search are now real API parameters, built below. Only other
         # instruction kinds become a system message, so an untouched pure-chat
         # still sends exactly the user's own text with zero extra baggage.
-        AUDIT_KINDS = ("深度思考", "智能搜索", "深度思考指令", "联网检索指令")
+        AUDIT_KINDS = ("深度思考", "智能搜索", "深度思考指令", "联网检索指令",
+                       "系统词 / 角色设定")  # already inlined into job["prompt"] by the client
         real_instr = [i for i in explicit
                       if scrub(str(i.get("kind") or "")) not in AUDIT_KINDS]
         if real_instr:
