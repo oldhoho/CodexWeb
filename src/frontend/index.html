@@ -1120,9 +1120,20 @@ try{
     }
   }
 }catch(e){}
-function saveModeDefs(){ try{ localStorage.setItem("cx.modeDefs",JSON.stringify(modeDefs)); }catch(e){} }
+// modeDefs is shared through /api/config (rev-locked); localStorage is only an
+// offline mirror. saveConfig merges onto the newest rev and retries on 409.
+// oninput fires per keystroke for the name/description fields, so debounce the
+// network write while still mirroring locally on every change.
+let modeDefsSaveTimer=null;
+function saveModeDefs(){
+  try{ localStorage.setItem("cx.modeDefs",JSON.stringify(modeDefs)); }catch(e){}
+  clearTimeout(modeDefsSaveTimer);
+  modeDefsSaveTimer=setTimeout(()=>{
+    saveConfig({modeDefs:modeDefs}).catch(e=>{ toast("工作模式同步失败："+e.message); });
+  }, 500);
+}
 function resetModeDefs(){
-  if (!confirm("把所有工作模式恢复为出厂默认？名称、说明、开关和系统词绑定都会还原（提示词库不受影响）。")) return;
+  if (!confirm("把所有工作模式恢复为出厂默认？名称、说明、开关和系统词绑定都会还原，并同步到启动器（提示词库不受影响）。")) return;
   modeDefs = freshModeDefs(); saveModeDefs(); renderMode(); renderPrompts();
   toast("工作模式已恢复默认");
 }
@@ -1162,6 +1173,33 @@ async function loadConfig(){
     cfgState={rev:Number(r.rev)||0, config:(r.config && typeof r.config==="object") ? r.config : {}};
   }catch(e){}
   return cfgState;
+}
+// Apply shared settings from /api/config to the in-memory UI state. `seed=true`
+// pushes the local (legacy localStorage) values up on first connect so upgrading
+// installs don't lose their customizations. Remote always wins afterwards.
+async function applySharedConfig(seed){
+  const c=cfgState.config||{};
+  const sd=c.modeDefs;
+  if (sd && typeof sd==="object"){
+    for (const k in MODE_DEFAULTS){
+      const s=sd[k]; if(!s) continue;
+      for (const f of MODE_FIELDS) if (s[f]!==undefined) modeDefs[k][f]=s[f];
+    }
+    try{ localStorage.setItem("cx.modeDefs",JSON.stringify(modeDefs)); }catch(e){}
+  } else if (seed) {
+    // First run: migrate local modeDefs into the shared config.
+    try{ await saveConfig({modeDefs:modeDefs}); }catch(e){}
+  }
+  const ps=c.prompts;
+  if (Array.isArray(ps) && ps.length){
+    const list=ps.filter(p=>p&&p.id).map(p=>({id:String(p.id),name:String(p.name||"未命名预设"),text:String(p.text||"")}));
+    if (list.length){ promptList=list;
+      if(!list.some(p=>p.id===activePrompt)) activePrompt=list[0].id;
+      try{ localStorage.setItem("cx.prompts",JSON.stringify(promptList)); }catch(e){}
+    }
+  } else if (seed) {
+    try{ await saveConfig({prompts:promptList}); }catch(e){}
+  }
 }
 // Re-apply on 409: the server returns its current rev/config, so we merge our
 // patch onto the newest state instead of overwriting another client's change.
@@ -1829,13 +1867,28 @@ async function pollHistory(){
   }catch(e){}
   finally{ histLoading=false; }
 }
+// Shared config (favorites / work modes / prompts) is polled independently of
+// the conversation poll, so settings edits on the launcher show up even when
+// this tab is sitting on a non-chat tool.
+async function pollSharedConfig(){
+  try{
+    const r=await api("GET","/api/config");
+    const rev=Number(r.rev)||0;
+    if (rev===cfgState.rev) return;
+    cfgState={rev, config:(r.config && typeof r.config==="object") ? r.config : {}};
+    const editing = /^(cfgName|cfgDesc|promptName|promptText)$/.test(document.activeElement?.id||"");
+    await applySharedConfig(false);
+    if (!editing){ renderMode(); renderPrompts(); }
+    refreshFavButtons(); renderFavPanel();
+  }catch(e){ /* transient/offline: keep current UI */ }
+}
 function startVisibilityPolling(){
   if (pollStarted) return; pollStarted=true;
-  setInterval(()=>{ if (!chatVisible()) return; pollSessionMeta(); pollHistory(); }, VIS_POLL_MS);
+  setInterval(()=>{ pollSharedConfig(); if (!chatVisible()) return; pollSessionMeta(); pollHistory(); }, VIS_POLL_MS);
   document.addEventListener("visibilitychange", ()=>{
-    if (document.visibilityState==="visible" && chatVisible()){
-      pollSessionMeta(); pollHistory();   // catch up immediately on resume
-    }
+    if (document.visibilityState!=="visible") return;
+    pollSharedConfig();
+    if (chatVisible()){ pollSessionMeta(); pollHistory(); }   // catch up immediately on resume
   });
 }
 // ---- smart mode suggestion ---------------------------------------------
@@ -3326,10 +3379,14 @@ function renderPrompts(){
   const p=currentPrompt();
   if (p){ $("promptName").value=p.name; $("promptText").value=p.text; }
 }
+function savePromptPresets(){
+  try{ localStorage.setItem("cx.prompts",JSON.stringify(promptList)); }catch(e){}
+  saveConfig({prompts:promptList}).catch(e=>{ toast("提示词同步失败："+e.message); });
+}
 $("promptAdd").onclick=()=>{
   const p={id:"p"+Date.now().toString(36), name:"未命名预设", text:""};
   promptList.push(p); activePrompt=p.id;
-  localStorage.setItem("cx.prompts",JSON.stringify(promptList));
+  savePromptPresets();
   localStorage.setItem("cx.promptActive",p.id);
   renderPrompts(); $("promptName").focus(); $("promptName").select();
 };
@@ -3337,8 +3394,8 @@ $("promptSave").onclick=()=>{
   const p=currentPrompt(); if(!p) return;
   p.name=$("promptName").value.trim()||"未命名预设";
   p.text=$("promptText").value;
-  localStorage.setItem("cx.prompts",JSON.stringify(promptList));
-  renderPrompts(); toast("预设已保存");
+  savePromptPresets();
+  renderPrompts(); toast("预设已保存（两端同步）");
 };
 $("promptCopy").onclick=()=>{ copyText($("promptText").value); toast("系统词已复制"); };
 $("promptDel").onclick=()=>{
@@ -3346,9 +3403,9 @@ $("promptDel").onclick=()=>{
   if (!confirm("删除预设「"+currentPrompt().name+"」？")) return;
   promptList=promptList.filter(p=>p.id!==activePrompt);
   activePrompt=promptList[0].id;
-  localStorage.setItem("cx.prompts",JSON.stringify(promptList));
+  savePromptPresets();
   localStorage.setItem("cx.promptActive",activePrompt);
-  renderPrompts(); toast("已删除");
+  renderPrompts(); toast("已删除（两端同步）");
 };
 
 /* ---------- files ---------- */
@@ -3749,6 +3806,8 @@ async function boot(){
   try{
     await loadCaps();
     await loadConfig();
+    await applySharedConfig(true);   // work modes + prompts from the shared config
+    renderMode(); renderPrompts();
     await loadSessions();
     if(!session) await newSession();
     else {
