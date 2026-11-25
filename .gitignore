@@ -1,0 +1,39 @@
+# ============================================================
+# CodexWeb - what is intentionally NOT in this repository
+# ============================================================
+
+# Build outputs: 1.7 GB of intermediates + test browser profiles.
+# Also contains the signing keystore (codexweb.jks) - never commit keys.
+build/
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+
+# Binary runtime payload. These are large (rootfs.tar.gz ~159 MB,
+# jadx.jar ~77 MB) and exceed / strain GitHub's 100 MB file limit.
+# They are reconstructed at build time; see README "Building".
+assets/payload/rootfs.tar.gz
+assets/payload/bin/
+assets/payload/codexweb/tools/*.jar
+
+# Kept in repo: small text payload that is the single source of truth.
+# (assets/payload/codexweb/codexd.py, launch.sh, ui/index.html,
+#  assets/payload/VERSION are tiny and ARE tracked.)
+
+# Python / editor / OS noise
+__pycache__/
+*.py[cod]
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local secrets & user data (should never exist in repo, but be safe)
+auth.json
+*.local
+.env
+backups/
+sessions/
