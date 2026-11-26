@@ -369,6 +369,19 @@ svg{display:block;flex-shrink:0}
 
 /* ---------- settings ---------- */
 .settingsGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px;align-items:start}
+.secActions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0}
+.secPending{font-size:12px;color:var(--label-2)}
+.secGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;align-items:start}
+.secCard{padding:17px 18px;border:1px solid var(--border-l2);border-radius:14px;background:var(--layer2)}
+.secCard h3{margin:0 0 4px;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:space-between}
+.secCard h3 .secCount{font-size:11px;font-weight:500;color:var(--label-3)}
+.secCard .sdesc{margin:0 0 12px;font-size:12px;line-height:1.6;color:var(--label-3)}
+.secCard textarea.secTa{width:100%;min-height:150px;padding:11px 12px;border:1px solid var(--border-l2);border-radius:9px;
+  background:var(--login-input);color:var(--text);outline:none;font-size:12.5px;line-height:1.65;resize:vertical;font-family:inherit}
+.secCard textarea.secTa:focus{border-color:var(--brand)}
+.secCard .secSave{margin-top:9px}
+.secCard .secLog{max-height:230px;overflow:auto;font-size:12px;line-height:1.7;white-space:pre-wrap;color:var(--label-2);
+  border:1px solid var(--border-l1);border-radius:9px;padding:10px 12px;background:var(--login-input)}
 .setCard{padding:17px 18px;border:1px solid var(--border-l2);border-radius:14px;background:var(--layer2)}
 .setCard h3{display:flex;align-items:center;gap:8px;margin:0 0 4px;font-size:14px;font-weight:700}
 .setCard h3 .ic{width:16px;height:16px;color:var(--brand-text)}
@@ -678,6 +691,7 @@ svg{display:block;flex-shrink:0}
         <button class="navItem active" data-tool="chat"><svg class="ic"><use href="#i-logo"/></svg>对话</button>
         <button class="navItem" data-tool="term"><svg class="ic"><use href="#i-terminal"/></svg>终端<span class="tag">原生</span></button>
         <button class="navItem" data-tool="files"><svg class="ic"><use href="#i-files"/></svg>文件管理</button>
+        <button class="navItem" data-tool="secretary"><svg class="ic"><use href="#i-prompt"/></svg>我的秘书</button>
       </div>
       <div class="navGroup"><div class="navLabel">工具箱</div>
         <button class="navItem" data-tool="capture"><svg class="ic"><use href="#i-capture"/></svg>网络抓包<span class="tag">工具</span></button>
@@ -702,7 +716,7 @@ svg{display:block;flex-shrink:0}
         <span>💰</span><span class="bBal" id="balanceVal">余额 …</span>
         <span class="bSub" id="balanceSub">DeepSeek</span>
       </div>
-      <div class="verRow">v74 · 本机 proot 运行</div>
+      <div class="verRow">v75 · 本机 proot 运行</div>
     </div>
   </aside>
   <div class="drawerMask" id="drawerMask"></div>
@@ -743,6 +757,7 @@ svg{display:block;flex-shrink:0}
                 <button data-mode="chat">纯对话</button>
                 <button data-mode="device">手机控制</button>
                 <button data-mode="custom">自定义</button>
+                <button data-mode="secretary">秘书</button>
               </div>
             </div>
             <div class="attachTray" id="attachTray"></div>
@@ -902,7 +917,7 @@ svg{display:block;flex-shrink:0}
           <h2>提示词与工作模式</h2><p>这里统一配置「发什么指令」和「怎么思考」。工作模式决定推理强度与各类指令开关，系统词预设决定注入的角色内容，二者共同影响每条发送给 Codex 的消息。</p>
         </div></div>
         <div class="panel"><h3>工作模式</h3>
-          <p>五个模式的名称与全部配置都能自定义，改动立即生效并保存在本机。选中一个模式，在下方改它的名字、说明、推理强度、思考/搜索/系统词开关，以及它携带的系统词预设；不同会话仍各自记住当前模式。</p>
+          <p>六个模式的名称与全部配置都能自定义，改动立即生效并保存在本机。选中一个模式，在下方改它的名字、说明、推理强度、思考/搜索/系统词开关，以及它携带的系统词预设；不同会话仍各自记住当前模式。「秘书」模式的长期记忆在「我的秘书」页管理。</p>
           <div class="modeWrap">
             <div class="modeSeg" id="promptModeSeg">
               <button data-mode="full">全能</button>
@@ -910,6 +925,7 @@ svg{display:block;flex-shrink:0}
               <button data-mode="chat">纯对话</button>
               <button data-mode="device">手机控制</button>
               <button data-mode="custom">自定义</button>
+              <button data-mode="secretary">秘书</button>
             </div>
             <span class="modeDesc" id="promptModeDesc"></span>
           </div>
@@ -990,6 +1006,21 @@ svg{display:block;flex-shrink:0}
           <h2>设置</h2><p>按功能分组管理。所有配置保存在本机；API Key 只写入 guest 的 <code>auth.json</code>，不会回显、不会进日志。</p>
         </div></div>
         <div class="settingsGrid" id="settingsBox"></div>
+      </div></div></section>
+
+      <!-- SECRETARY -->
+      <section class="view" id="view-secretary"><div class="toolPage"><div class="toolInner">
+        <div class="toolHero"><div class="hicon"><svg class="ic"><use href="#i-prompt"/></svg></div><div>
+          <h2>我的秘书</h2><p>跨会话长期记忆与稳定人格。秘书在完成任务时自动记工作日志、在你明确要求时记笔记；点「编译画像」把素材整理成两份常驻文档。</p>
+        </div></div>
+        <div class="secActions">
+          <button class="btn primary" id="secCompile">编译画像</button>
+          <button class="btn" id="secRefresh">刷新</button>
+          <span class="secPending" id="secPending"></span>
+        </div>
+        <div class="secGrid" id="secGrid">
+          <div class="hint">加载中…</div>
+        </div>
       </div></div></section>
 
       <!-- GUIDE -->
@@ -1100,11 +1131,13 @@ const MODE_DEFAULTS = {
   chat:   {name:"纯对话", effort:"minimal", think:false, search:false, prompt:false},
   device: {name:"手机控制", effort:"minimal", think:false, search:false, prompt:false},
   custom: {name:"自定义", effort:"medium",  think:false, search:false, prompt:true},
+  secretary: {name:"秘书", effort:"low", think:false, search:false, prompt:false},
 };
 const MODE_LABEL_FALLBACK = {
   full:"全部工具 + 高强度推理", lite:"基础工具 + 低推理",
   chat:"极简直连 API，零系统提示/零工具，最省 Token",
   device:"从技能模块编排流程，不能自由操控手机", custom:"自定义选项",
+  secretary:"跨会话私人秘书，长期记忆 + 稳定人格",
 };
 // modeDefs[key] = {name, desc, effort, think, search, prompt, promptId}
 //   promptId = id of the system-prompt preset this mode carries; "" = none.
@@ -2310,11 +2343,11 @@ async function send(){
   // previously failed we warn but still allow (network may have recovered).
   // chat + device both call the API directly (no Codex CLI). Device mode
   // orchestrates user-authored skill modules instead of free-form control.
-  const isPlain = workMode === "chat" || workMode === "device";
+  const isPlain = workMode === "chat" || workMode === "device" || workMode === "secretary";
   const st = await refreshApiStatus(false);
   if (isPlain){
     if (!st || !st.direct_ok){
-      toast((workMode==="device"?"手机控制":"纯对话")+"需要先到「设置 → 模型与 API」填写 Key 与 Base URL");
+      toast((workMode==="device"?"手机控制":workMode==="secretary"?"秘书":"纯对话")+"需要先到「设置 → 模型与 API」填写 Key 与 Base URL");
       switchTool("settings"); return;
     }
   } else {
@@ -3056,6 +3089,7 @@ $("reviewCopyAll").onclick=async()=>{
 /* ---------- tool switching ---------- */
 const TOOL_META = {
   chat:{name:"对话", icon:"i-logo"}, term:{name:"终端", icon:"i-terminal"},
+  secretary:{name:"我的秘书", icon:"i-prompt"},
   files:{name:"文件管理", icon:"i-files"}, capture:{name:"网络抓包", icon:"i-capture"},
   apk:{name:"APK 工具", icon:"i-apk"}, skills:{name:"模块 DIY", icon:"i-prompt"},
   phone:{name:"手机控制", icon:"i-terminal"},
@@ -3087,6 +3121,7 @@ function switchTool(id, noHash){
   if (id==="prompts") renderPrompts();
   if (id==="skills") renderSkills();
   if (id==="phone") refreshPhoneStatus();
+  if (id==="secretary") loadSecretary();
 }
 document.querySelectorAll(".navItem[data-tool]").forEach(b=>{ b.onclick=()=>switchTool(b.dataset.tool); });
 window.addEventListener("hashchange", ()=>switchTool(location.hash.slice(1)||"chat", true));
@@ -3746,6 +3781,82 @@ function setCard(title, iconId, desc, inner){
   $("settingsBox").appendChild(d); return body;
 }
 function kv(k,v){ return '<div class="kv"><span class="k">'+esc(k)+'</span><span class="v">'+esc(v)+'</span></div>'; }
+
+/* ---- My Secretary: cross-session memory with a compiled persona --------- */
+let secData = null;
+async function loadSecretary(){
+  const grid=$("secGrid"), pend=$("secPending");
+  if(!grid) return;
+  grid.innerHTML='<div class="hint">加载中…</div>';
+  try{
+    secData = await api("GET","/api/secretary");
+  }catch(e){ grid.innerHTML='<div class="hint">加载失败：'+esc(e.message)+'</div>'; return; }
+  const d=secData, b=d.budget||{persona:1200,human:1200};
+  const pct=(n,total)=> total?Math.min(100,Math.round(100*n/total)):0;
+  const last=d.last_compile?new Date(d.last_compile*1000).toLocaleString("zh-CN"):"尚未编译";
+  pend.textContent = d.pending>0
+    ? (d.pending>=d.threshold?"建议编译 · ":"")+"距上次编译新增 "+d.pending+" 条素材"
+    : "无待编译素材";
+  pend.style.color = d.pending>=d.threshold?"var(--brand-text)":"";
+  if(!d.configured) pend.textContent += " · 未配置 API，无法编译";
+  grid.innerHTML =
+    '<div class="secCard"><h3>秘书画像 persona <span class="secCount">'+d.persona.length+' / '+b.persona+' 字</span></h3>'+
+    '<p class="sdesc">秘书自己的人设：语气、详略、主动性、称呼、禁忌。由编译生成，也可手动改。</p>'+
+    '<textarea class="secTa" id="secPersona" placeholder="还没有画像，聊几轮后点「编译画像」">'+esc(d.persona)+'</textarea>'+
+    '<button class="btn secSave" data-sec-save="persona">保存画像</button></div>'+
+    '<div class="secCard"><h3>用户档案 human <span class="secCount">'+d.human.length+' / '+b.human+' 字</span></h3>'+
+    '<p class="sdesc">关于你的记录：背景、偏好、在意与避开的事。由编译生成，也可手动改。</p>'+
+    '<textarea class="secTa" id="secHuman" placeholder="还没有档案，聊几轮后点「编译画像」">'+esc(d.human)+'</textarea>'+
+    '<button class="btn secSave" data-sec-save="human">保存档案</button></div>'+
+    '<div class="secCard"><h3>用户笔记 <span class="secCount">'+d.notes.length+' 字</span></h3>'+
+    '<p class="sdesc">你说「记住……」时秘书自动记下，也可在这里手动编辑。去重保存。</p>'+
+    '<textarea class="secTa" id="secNotes" placeholder="例如：不吃辣，汇报先说结论">'+esc(d.notes)+'</textarea>'+
+    '<button class="btn secSave" data-sec-save="notes">保存笔记</button></div>'+
+    '<div class="secCard"><h3>工作日志 <span class="secCount">只增不改</span></h3>'+
+    '<p class="sdesc">秘书完成任务时自动精简记录。编译读取最近 '+30+' 天。上次编译：'+esc(last)+'</p>'+
+    '<div class="secLog" id="secLog">加载中…</div>'+
+    '<div class="providerRow" style="margin-top:10px"><span class="hint" style="margin:0">提醒阈值</span>'+
+    '<input class="field" id="secThreshold" type="number" min="1" max="100" value="'+d.threshold+'" style="width:70px;height:34px;margin:0">'+
+    '<button class="btn" data-sec-save="threshold">保存</button></div></div>';
+  grid.querySelectorAll("[data-sec-save]").forEach(btn=>{
+    btn.onclick=()=>secSave(btn.dataset.secSave);
+  });
+  loadSecLog();
+}
+async function loadSecLog(){
+  const box=$("secLog"); if(!box) return;
+  try{
+    const r=await api("GET","/api/secretary/worklog");
+    box.textContent = r.text ? r.text : "（还没有工作日志。切到「秘书」模式聊几轮，完成明确任务后会自动记录。）";
+  }catch(e){ box.textContent="加载失败："+e.message; }
+}
+async function secSave(kind){
+  try{
+    if(kind==="persona"||kind==="human"){
+      await api("POST","/api/secretary/artefact",{which:kind,text:$(kind==="persona"?"secPersona":"secHuman").value});
+      toast((kind==="persona"?"秘书画像":"用户档案")+"已保存，下一轮生效");
+    } else if(kind==="notes"){
+      const r=await api("POST","/api/secretary/notes",{text:$("secNotes").value});
+      $("secNotes").value=r.notes||""; toast("用户笔记已保存");
+    } else if(kind==="threshold"){
+      await api("POST","/api/secretary/threshold",{value:parseInt($("secThreshold").value)||8});
+      toast("提醒阈值已保存");
+    }
+    loadSecretary();
+  }catch(e){ toast("保存失败："+e.message); }
+}
+if($("secCompile")) $("secCompile").onclick=async()=>{
+  if(!confirm("编译会读取工作日志与用户笔记，生成新的秘书画像和用户档案。\n这会改变对话前缀，下一轮缓存命中会重新计算（之后恢复）。\n\n确定编译吗？")) return;
+  const btn=$("secCompile"), old=btn.textContent; btn.textContent="编译中…"; btn.disabled=true;
+  try{
+    const r=await api("POST","/api/secretary/compile",{});
+    toast("编译完成：画像 "+r.persona_chars+" 字 · 档案 "+r.human_chars+" 字");
+    loadSecretary();
+  }catch(e){ toast("编译失败："+e.message); }
+  finally{ btn.textContent=old; btn.disabled=false; }
+};
+if($("secRefresh")) $("secRefresh").onclick=()=>loadSecretary();
+
 let settingsRenderSeq = 0;
 async function renderSettings(){
   const seq = ++settingsRenderSeq;
@@ -4006,7 +4117,7 @@ async function renderGuide(){
   <li><b>失控保护</b>：运行中的用量条会实时显示耗时 / 工具步数 / Token。单条指令若连续执行 24 步工具、累计 20 万 tok 或超过 6 分钟，会自动停止以防循环消耗；过程步骤会折叠，不再刷屏。遇到复杂任务请拆成多条消息分次执行。</li>
 </ol>
 <h2>五种工作模式（全部可自定义）</h2>
-<p>模式通过 <code>推理强度</code> 和注入指令的多少来真实影响消耗。纯对话每轮直连 DeepSeek，携带本会话历史；Codex 模式每轮是新进程。<b>五个模式的名称、说明、推理强度、深度思考/联网/系统词开关，以及各自携带的系统词，都能在「提示词与工作模式」页自由修改</b>，改完立即生效、自动保存在本机；只有内部标识固定（后端需要它区分直连 / 技能编排 / Codex 三条执行路径）。点「恢复默认模式」可一键还原。</p>
+<p>模式通过 <code>推理强度</code> 和注入指令的多少来真实影响消耗。纯对话每轮直连 DeepSeek，携带本会话历史；Codex 模式每轮是新进程。<b>六个模式的名称、说明、推理强度、深度思考/联网/系统词开关，以及各自携带的系统词，都能在「提示词与工作模式」页自由修改</b>，改完立即生效、自动保存在本机；只有内部标识固定（后端需要它区分直连 / 技能编排 / Codex 三条执行路径）。点「恢复默认模式」可一键还原。</p>
 <ul>
   <li><b>全能</b>（出厂默认）：高强度推理（high）+ 深度思考 + 联网 + 系统词 —— 极致能力，Token 最高。注意：本机国内网络无法直连外网，Codex 内置的外网抓取工具不可用；需要联网请改用纯对话 + 联网搜索。</li>
   <li><b>轻量</b>（出厂默认）：低推理（low）+ 系统词 —— 日常平衡。</li>

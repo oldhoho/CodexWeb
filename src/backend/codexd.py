@@ -67,6 +67,10 @@ WORK_MODES = {
     # Phone control: NO free-form device access. The model may only pick from
     # user-authored skill modules and fill their declared parameters.
     "device": {"effort": "minimal", "tools": False},
+    # Personal secretary: direct API + cross-session compiled memory. The mode
+    # itself is lean (no tools); persona/human are injected by _run_direct from
+    # the compiled files, so they enter the frozen prefix byte-stably.
+    "secretary": {"effort": "low", "tools": False},
 }
 DIRECT_CHAT_MODEL = "deepseek-flash"  # pure-chat calls the configured model directly (V4.1: thinking + web search)
 CTX_DIR = ".cxweb"                  # per-session context-review records
@@ -102,6 +106,35 @@ COMPACT_SNAP_FILE = "compact_snap.json"  # frozen summary anchor, inside .cxweb/
 # Once a session enables 联网搜索 we keep `tools` declared for good and use
 # tool_choice:"none" to switch actual browsing off, so the prefix stays stable.
 TOOLS_STICKY_KEY = "tools_on"
+
+# --- Personal secretary: cross-session memory with a compiled persona -------
+# Everything lives in plain files under ROOT/secretary (no DB, no vector lib).
+# Two MATERIAL layers (append-only worklog + user notes) feed one COMPILE step
+# (a single LLM call) that produces two BYTE-STABLE artefacts (persona/human).
+# The artefacts go into the frozen system prefix, so they only change the
+# cache prefix on the turn they are recompiled -- exactly like summary reanchor.
+SECRETARY_DIR = os.path.join(ROOT, "secretary")
+SEC_WORKLOG_DIR = os.path.join(SECRETARY_DIR, "worklog")
+SEC_NOTES_FILE = os.path.join(SECRETARY_DIR, "notes.md")
+SEC_PERSONA_FILE = os.path.join(SECRETARY_DIR, "persona.md")
+SEC_HUMAN_FILE = os.path.join(SECRETARY_DIR, "human.md")
+SEC_META_FILE = os.path.join(SECRETARY_DIR, "meta.json")
+SEC_PERSONA_BUDGET = 1200   # chars of the compiled 秘书画像 injected per turn
+SEC_HUMAN_BUDGET = 1200     # chars of the compiled 用户档案 injected per turn
+SEC_WORKLOG_KEEP_DAYS = 30  # compile reads at most this many recent daily logs
+SEC_COMPILE_THRESHOLD = 8   # default: suggest recompile after N new log entries
+SEC_LOG_OPEN, SEC_LOG_CLOSE = "⟦LOG⟧", "⟦/LOG⟧"
+SEC_NOTE_OPEN, SEC_NOTE_CLOSE = "⟦NOTE⟧", "⟦/NOTE⟧"
+# Fixed contract appended to the system prompt: tells the model WHEN to emit
+# the markers. It never changes between compiles -> stays in the stable prefix.
+SEC_RECORD_CONTRACT = (
+    "\n\n【记录约定】你具备跨会话长期记忆。完成一个明确任务或得出实质结论后，"
+    "在正文末尾另起一行附一条工作记录（用户不可见，勿在正文提及），格式："
+    "⟦LOG⟧任务: <一句话>\n结论: <结果或待办>\n风格: <观察到的用户风格信号，可留空>⟦/LOG⟧。"
+    "仅当用户明确要求「记住/别忘了」时，另附一条："
+    "⟦NOTE⟧<需要长期记住的原话>⟦/NOTE⟧。没有值得记的内容就不要输出任何标记。"
+)
+
 # A fixed, byte-stable system note declaring the web-search capability.
 # Declaring `tools` enables the tool but does NOT tell the model it can browse:
 # asked "can you search the web?", a bare API call falls back to the model's
@@ -1724,6 +1757,12 @@ class Runner:
         ctx["prompt_sent"] = job["prompt"]
         sid = job["sid"]
         caps = read_caps()
+        # Secretary mode: replace the (empty) client system prompt with the
+        # COMPILED persona + human + fixed record contract. These files only
+        # change on a compile, so they sit in the frozen prefix byte-stably.
+        is_secretary = str(job.get("ctx", {}).get("mode") or "") == "secretary"
+        if is_secretary:
+            ctx["system_prompt"] = sec_system_prompt()
         # tools stickiness is still needed: declaring the web-search schema
         # changes the request prefix, so once a session enables it we keep it.
         want_search = bool(ctx.get("search"))
@@ -1899,7 +1938,12 @@ class Runner:
                         # frontend replaces the bubble on each event, which
                         # gives real token-by-token output without duplicating
                         # fragments; the final `message` below is authoritative.
-                        self.emit(job, "stream", {"text": "".join(full)})
+                        # Secretary: hide ⟦LOG⟧/⟦NOTE⟧ directives mid-stream so
+                        # they never flash in the UI (final message is clean).
+                        shown = "".join(full)
+                        if is_secretary:
+                            shown = sec_parse_markers(shown)[0]
+                        self.emit(job, "stream", {"text": shown})
                         self.diag = {"status": "运行中（纯对话流式输出 %d 字）" % len("".join(full)),
                                      "phase": "streaming", "id": job["id"],
                                      "time": int(time.time()),
@@ -1919,6 +1963,15 @@ class Runner:
             self._finish(job, 1, msg)
             return
         text = "".join(full)
+        # Secretary: strip ⟦LOG⟧/⟦NOTE⟧ markers from the visible/persisted reply
+        # and append their bodies to the material files. Clean text is what
+        # enters the cached prefix on later turns -- no directives leak in.
+        if is_secretary:
+            text, sec_logs, sec_notes = sec_parse_markers(text)
+            for entry in sec_logs:
+                sec_append_log(entry)
+            for entry in sec_notes:
+                sec_append_note(entry)
         # Store the exact assistant message for later turns. No strip(): the
         # model's own trailing newline is part of the persisted cache unit.
         amsg = {"content": text}
@@ -2630,6 +2683,212 @@ def write_caps(patch):
             cur[k] = bool(patch[k])
     write_private(CAPS_FILE, json.dumps(cur, ensure_ascii=False))
     log("caps updated: %s" % cur)
+
+
+# ---------------------------------------------------------------------------
+# Personal secretary storage. Two material layers (append-only worklog + user
+# notes) -> one compile step -> two byte-stable artefacts (persona/human).
+# All plain files, atomic writes, stdlib only.
+# ---------------------------------------------------------------------------
+def sec_ensure():
+    try:
+        os.makedirs(SEC_WORKLOG_DIR, exist_ok=True)
+    except OSError as ex:
+        log("secretary mkdir failed: %s" % ex)
+
+
+def sec_read_file(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except (OSError, ValueError):
+        return ""
+
+
+def sec_write_file(path, text):
+    sec_ensure()
+    write_private(path, str(text or ""))
+
+
+def sec_worklog_path(ts=None):
+    ts = ts if ts is not None else time.time()
+    day = time.strftime("%Y-%m-%d", time.localtime(ts))
+    return os.path.join(SEC_WORKLOG_DIR, day + ".md")
+
+
+def sec_parse_markers(text):
+    """Extract ⟦LOG⟧...⟦/LOG⟧ and ⟦NOTE⟧...⟦/NOTE⟧ blocks from an assistant
+    reply. Returns (clean_text, logs, notes). The markers -- and everything
+    between them -- are stripped from clean_text so they reach neither the UI
+    nor the persisted assistant_msg / cached prefix. Unclosed markers are also
+    stripped from the tail (a stopped stream must not leak raw directives)."""
+    text = str(text or "")
+    logs, notes = [], []
+
+    def cut(o, c, bucket):
+        nonlocal text
+        while o in text:
+            i = text.find(o)
+            j = text.find(c, i + len(o))
+            if j < 0:
+                text = text[:i]              # unclosed: drop from opener on
+                break
+            bucket.append(text[i + len(o):j].strip())
+            text = text[:i] + text[j + len(c):]
+
+    cut(SEC_LOG_OPEN, SEC_LOG_CLOSE, logs)
+    cut(SEC_NOTE_OPEN, SEC_NOTE_CLOSE, notes)
+    return text.rstrip(), logs, notes
+
+
+def sec_append_log(entry, ts=None):
+    """Append one ⟦LOG⟧ body to today's append-only worklog."""
+    body = scrub(str(entry or "")).strip()
+    if not body:
+        return False
+    sec_ensure()
+    path = sec_worklog_path(ts)
+    stamp = time.strftime("%H:%M:%S", time.localtime(ts if ts is not None else time.time()))
+    line = "- %s %s" % (stamp, body.replace("\n", " / "))
+    old = sec_read_file(path)
+    if not old:
+        old = "# 工作日志 %s\n\n" % os.path.basename(path)[:-3]
+    with open(path, "a", encoding="utf-8") as f:
+        if not old.endswith("\n"):
+            f.write("\n")
+        f.write(line + "\n")
+    sec_bump_pending()
+    log("secretary: appended worklog entry (%d chars)" % len(body))
+    return True
+
+
+def sec_append_note(entry):
+    """Append one ⟦NOTE⟧ body to user notes, skipping exact duplicates."""
+    body = scrub(str(entry or "")).strip()
+    if not body:
+        return False
+    old = sec_read_file(SEC_NOTES_FILE)
+    if body in old:
+        return False
+    line = "- " + body.replace("\n", " ")
+    sec_write_file(SEC_NOTES_FILE, (old.rstrip() + "\n" + line + "\n") if old.strip()
+                   else ("# 用户笔记\n\n" + line + "\n"))
+    sec_bump_pending()
+    log("secretary: appended user note (%d chars)" % len(body))
+    return True
+
+
+def sec_meta():
+    try:
+        with open(SEC_META_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            return d
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def sec_write_meta(patch):
+    d = sec_meta()
+    d.update(patch or {})
+    d["updated_at"] = int(time.time())
+    sec_write_file(SEC_META_FILE, json.dumps(d, ensure_ascii=False, indent=2))
+
+
+def sec_bump_pending():
+    d = sec_meta()
+    sec_write_meta({"pending": int(d.get("pending") or 0) + 1})
+
+
+def sec_recent_worklog():
+    """Most recent daily logs (newest first, bounded by SEC_WORKLOG_KEEP_DAYS)."""
+    sec_ensure()
+    try:
+        names = sorted((n for n in os.listdir(SEC_WORKLOG_DIR) if n.endswith(".md")),
+                       reverse=True)[:SEC_WORKLOG_KEEP_DAYS]
+    except OSError:
+        return ""
+    parts = []
+    for n in names:
+        txt = sec_read_file(os.path.join(SEC_WORKLOG_DIR, n)).strip()
+        if txt:
+            parts.append(txt)
+    return "\n\n".join(parts)[:20000]
+
+
+def sec_system_prompt():
+    """Frozen system block for secretary mode: compiled persona + human + the
+    fixed record contract. Byte-stable until a compile rewrites a file."""
+    persona = sec_read_file(SEC_PERSONA_FILE).strip()[:SEC_PERSONA_BUDGET]
+    human = sec_read_file(SEC_HUMAN_FILE).strip()[:SEC_HUMAN_BUDGET]
+    blocks = []
+    if persona:
+        blocks.append("【秘书画像 · persona】\n" + persona)
+    if human:
+        blocks.append("【关于用户 · human】\n" + human)
+    blocks.append("你是用户的私人秘书：可靠、克制、有分寸；不确定就明说，绝不编造记忆。")
+    blocks.append(SEC_RECORD_CONTRACT.strip())
+    return "\n\n".join(blocks)
+
+
+def sec_compile():
+    """One LLM call: read the two material layers, compile persona + human.
+    Returns {ok, persona, human, ...}. Artefacts are only written on success."""
+    worklog = sec_recent_worklog()
+    notes = sec_read_file(SEC_NOTES_FILE).strip()[:12000]
+    old_persona = sec_read_file(SEC_PERSONA_FILE).strip()[:SEC_PERSONA_BUDGET]
+    old_human = sec_read_file(SEC_HUMAN_FILE).strip()[:SEC_HUMAN_BUDGET]
+    if not worklog and not notes and not old_persona and not old_human:
+        raise Bad("还没有可编译的素材：先聊聊、让秘书记几条工作记录，或写点用户笔记")
+    prompt = (
+        "你是长期记忆编译器。把下面的素材编译成两份稳定的画像文档，供另一个 AI 秘书在每次对话时常驻使用。\n\n"
+        "规则：\n"
+        "1. persona（秘书画像）：描述这个秘书应以什么语气、详略、主动性、称呼、禁忌来回应这位用户——"
+        "是「秘书自己的人设与相处方式」，不是用户档案。\n"
+        "2. human（用户档案）：描述用户的身份背景、偏好、在意什么、避开什么、长期目标——是「关于用户」的记录。\n"
+        "3. 只用素材里有依据的内容，不要编造；与旧文档冲突时以新素材为准并保留仍然有效的部分。\n"
+        "4. 每份用简洁的中文分点，不要序号外的花哨格式。\n\n"
+        "【工作日志】\n%s\n\n【用户笔记】\n%s\n\n【现有秘书画像】\n%s\n\n【现有用户档案】\n%s\n\n"
+        "只输出一个 JSON 对象，键为 persona 和 human，值为字符串，不要任何解释文字或代码块标记。"
+        % (worklog[:12000] or "（空）", notes or "（空）",
+           old_persona or "（空）", old_human or "（空）")
+    )
+    text, usage = direct_chat([{"role": "user", "content": prompt}], timeout=120, think=False)
+    raw = str(text or "").strip()
+    m = re.search(r"\{[\s\S]*\}", raw)          # tolerate prose/code fences around JSON
+    data = {}
+    if m:
+        try:
+            data = json.loads(m.group(0))
+        except ValueError:
+            data = {}
+    persona = str(data.get("persona") or "").strip()[:SEC_PERSONA_BUDGET]
+    human = str(data.get("human") or "").strip()[:SEC_HUMAN_BUDGET]
+    if not persona and not human:
+        raise RuntimeError("编译器没有返回可用的 persona/human，素材可能太少或模型输出格式异常")
+    sec_write_file(SEC_PERSONA_FILE, persona + "\n")
+    sec_write_file(SEC_HUMAN_FILE, human + "\n")
+    sec_write_meta({"pending": 0, "last_compile": int(time.time()),
+                    "last_persona_chars": len(persona), "last_human_chars": len(human)})
+    log("secretary: compiled persona=%d human=%d chars" % (len(persona), len(human)))
+    return {"ok": True, "persona": persona, "human": human,
+            "persona_chars": len(persona), "human_chars": len(human)}
+
+
+def sec_state():
+    """Full state for the secretary settings page."""
+    meta = sec_meta()
+    return {
+        "persona": sec_read_file(SEC_PERSONA_FILE).strip(),
+        "human": sec_read_file(SEC_HUMAN_FILE).strip(),
+        "notes": sec_read_file(SEC_NOTES_FILE).strip(),
+        "pending": int(meta.get("pending") or 0),
+        "threshold": int(meta.get("threshold") or SEC_COMPILE_THRESHOLD),
+        "last_compile": meta.get("last_compile"),
+        "budget": {"persona": SEC_PERSONA_BUDGET, "human": SEC_HUMAN_BUDGET},
+        "configured": bool(configured_base_url() and load_api_key()),
+    }
     return cur
 
 
@@ -3888,6 +4147,34 @@ class Handler(BaseHTTPRequestHandler):
             session_path(sid)  # validate
             return self.send_json({"session": sid, "text": read_memory(sid),
                                    "path": "MEMORY.md"})
+        if path == "/api/secretary" and method == "GET":
+            return self.send_json(sec_state())
+        if path == "/api/secretary/worklog" and method == "GET":
+            return self.send_json({"text": sec_recent_worklog()})
+        if path == "/api/secretary/notes" and method == "POST":
+            b = self.json_body(256 * 1024)
+            sec_write_file(SEC_NOTES_FILE, str(b.get("text", ""))[:20000])
+            return self.send_json({"ok": True, "notes": sec_read_file(SEC_NOTES_FILE)})
+        if path == "/api/secretary/artefact" and method == "POST":
+            # Manual edit of a compiled artefact (persona/human). Editing it
+            # changes the frozen prefix on the next turn by design.
+            b = self.json_body(256 * 1024)
+            which = str(b.get("which") or "")
+            text = str(b.get("text", ""))[:SEC_PERSONA_BUDGET if which == "persona" else SEC_HUMAN_BUDGET]
+            if which == "persona":
+                sec_write_file(SEC_PERSONA_FILE, text)
+            elif which == "human":
+                sec_write_file(SEC_HUMAN_FILE, text)
+            else:
+                raise Bad("which must be persona or human")
+            return self.send_json({"ok": True, "text": text})
+        if path == "/api/secretary/compile" and method == "POST":
+            return self.send_json(sec_compile())
+        if path == "/api/secretary/threshold" and method == "POST":
+            b = self.json_body(4096)
+            n = max(1, min(100, int(b.get("value") or SEC_COMPILE_THRESHOLD)))
+            sec_write_meta({"threshold": n})
+            return self.send_json({"ok": True, "threshold": n})
         if path == "/api/history/sig" and method == "GET":
             # Cheap poll endpoint: only filenames, no message bodies.
             return self.send_json(history_sig(q.get("s", [""])[0]))
