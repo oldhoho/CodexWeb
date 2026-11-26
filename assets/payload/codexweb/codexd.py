@@ -99,7 +99,7 @@ SUMMARY_BUDGET = 2500     # max chars of compressed history injected
 COMPACT_SNAP_FILE = "compact_snap.json"  # frozen summary anchor, inside .cxweb/
 # Session-sticky search tool. DeepSeek folds the tool schema into the cached
 # prompt prefix; adding/removing `tools` between turns invalidates that prefix.
-# Once a session enables 智能搜索 we keep `tools` declared for good and use
+# Once a session enables 联网搜索 we keep `tools` declared for good and use
 # tool_choice:"none" to switch actual browsing off, so the prefix stays stable.
 TOOLS_STICKY_KEY = "tools_on"
 REASONING_REPLAY_BUDGET = 8000   # max chars of one turn's CoT replayed
@@ -367,7 +367,7 @@ AGENTS_MD = """# CodexWeb 工作区
 ## 联网检索（重要：本机国内网络无法直连外网）
 本机运行在中国移动网络下，**无法直接访问境外网站/搜索 RSS**（google/bing/duckduckgo/wikipedia 等外网抓取都会失败或超时），内置的联网抓取工具因此不可用。
 - **不要**用 curl/wget 去抓境外站点并反复重试——这是徒劳的，只会浪费 token 和时间。
-- 需要联网查最新信息时，请直接告诉用户：切换到「纯对话」模式并开启「智能搜索」开关。该模式使用 DeepSeek 服务端联网搜索（deepseek_web_search），搜索在 DeepSeek 服务器执行，只需连 api.deepseek.com，国内网络可用，且返回带引用来源。
+- 需要联网查最新信息时，请直接告诉用户：切换到「纯对话」模式并开启「联网搜索」开关。该模式使用 DeepSeek 服务端联网搜索（deepseek_web_search），搜索在 DeepSeek 服务器执行，只需连 api.deepseek.com，国内网络可用，且返回带引用来源。
 - 纯本地的文件读写、脚本、构建等仍在本工作区内正常进行（cwd 已锁定到当前会话）。
 """
 
@@ -1629,13 +1629,15 @@ class Runner:
         else:
             messages, ctxinfo = [], {"covered": 0, "raw_turns": 0,
                                      "total_turns": 0, "cacheable": False}
-        # Capability audit notes (深度思考 / 智能搜索) are recorded in ctx for
+        # Capability audit notes (深度思考 / 联网搜索) are recorded in ctx for
         # the review page but are NOT text the model should obey -- thinking
         # and web search are now real API parameters, built below. Only other
         # instruction kinds become a system message, so an untouched pure-chat
         # still sends exactly the user's own text with zero extra baggage.
-        AUDIT_KINDS = ("深度思考", "智能搜索", "深度思考指令", "联网检索指令",
-                       "系统词 / 角色设定")  # already inlined into job["prompt"] by the client
+        # NOTE: keep legacy kinds (智能搜索 / 联网检索指令) so old review records
+        # still parse; 联网搜索 is the current label pushed by the client.
+        AUDIT_KINDS = ("深度思考", "智能搜索", "联网搜索", "深度思考指令",
+                       "联网检索指令", "系统词 / 角色设定")  # already inlined into job["prompt"] by the client
         real_instr = [i for i in explicit
                       if scrub(str(i.get("kind") or "")) not in AUDIT_KINDS]
         if real_instr:
@@ -1674,7 +1676,7 @@ class Runner:
         # Persist stickiness: declaring tools changes the cached prefix, so
         # once this session has enabled search we keep the schema byte-identical
         # on every later turn and use tool_choice to switch browsing on/off.
-        # Without this, toggling 智能搜索 mid-conversation threw away the whole
+        # Without this, toggling 联网搜索 mid-conversation threw away the whole
         # cached prefix and re-billed every input token at full price.
         if want_search and not meta.get(TOOLS_STICKY_KEY):
             write_session_meta(sid, {TOOLS_STICKY_KEY: True})
@@ -2817,7 +2819,7 @@ def build_cacheable_context(sid, caps, include_reasoning=False):
             # DeepSeek requires prior turns' reasoning_content to be replayed
             # verbatim whenever `tools` is present (else HTTP 400). Attach it
             # only when `tools` is actually declared (session-sticky), so the
-            # bytes stay stable across 智能搜索 toggles within the session.
+            # bytes stay stable across 联网搜索 toggles within the session.
             take = reasoning_quota.get(id(t), 0)
             if take:
                 amsg["reasoning_content"] = str(t.get("reasoning") or "")[:take]
