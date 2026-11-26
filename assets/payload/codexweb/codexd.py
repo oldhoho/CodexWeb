@@ -1422,9 +1422,9 @@ def direct_chat(messages, timeout=120, think=False):
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
         method="POST")
     cafile = "/etc/ssl/certs/ca-certificates.crt"
-    ctx = (ssl.create_default_context(cafile=cafile)
-           if os.path.isfile(cafile) else ssl.create_default_context())
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+    ssl_ctx = (ssl.create_default_context(cafile=cafile)
+               if os.path.isfile(cafile) else ssl.create_default_context())
+    with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
         obj = json.loads(resp.read().decode("utf-8", "replace"))
     text = ""
     choices = obj.get("choices") or []
@@ -1776,9 +1776,12 @@ class Runner:
         try:
             # Point urllib at the bundled CA bundle explicitly (proot/Alpine).
             cafile = "/etc/ssl/certs/ca-certificates.crt"
-            ctx = (ssl.create_default_context(cafile=cafile)
-                   if os.path.isfile(cafile) else ssl.create_default_context())
-            with urllib.request.urlopen(req, timeout=180, context=ctx) as resp:
+            # NOTE: do NOT reuse `ctx` here -- the job context dict is still
+            # needed below (`ctx["assistant_msg"]`). Shadowing it with an
+            # SSLContext caused TypeError on item assignment.
+            ssl_ctx = (ssl.create_default_context(cafile=cafile)
+                       if os.path.isfile(cafile) else ssl.create_default_context())
+            with urllib.request.urlopen(req, timeout=180, context=ssl_ctx) as resp:
                 for raw in resp:
                     # Honour "stop" mid-stream: a hanging/slow reply must be
                     # interruptible, and whatever text already arrived is kept.
