@@ -210,6 +210,14 @@ svg{display:block;flex-shrink:0}
 .det .dbody{padding:0 12px 10px;font-size:12.5px;line-height:21px;white-space:pre-wrap;word-break:break-word;color:var(--label-2)}
 .det .dbody.mono{font-family:var(--mono);font-size:12px;line-height:19px}
 .det .dbody pre{margin:0;font:inherit}
+/* Web-search source links: tappable title + host, opens in system browser. */
+.srcDet .dbody{padding:4px 8px 8px}
+.srcLink{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:8px;
+  color:var(--brand-text);text-decoration:none;line-height:1.4}
+.srcLink:hover,.srcLink:focus{background:var(--hover);outline:0}
+.srcTitle{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.srcHost{flex-shrink:0;color:var(--caption);font-size:11px}
+.srcGo{flex-shrink:0;width:14px;height:14px;opacity:.55;transform:rotate(45deg)}
 /* markdown */
 .md>*:first-child{margin-top:0}.md>*:last-child{margin-bottom:0}
 .md h1,.md h2,.md h3,.md h4{font-weight:700;line-height:1.4;margin:18px 0 8px}
@@ -1522,6 +1530,35 @@ function addDetails(title, iconId, mono){
   $("chatLog").appendChild(d); setEmpty(false); scrollLog();
   return d.querySelector("pre");
 }
+// Render web-search sources as clickable titles. The WebView routes any
+// http/https link outside 127.0.0.1:8123 to the system browser, so a plain
+// <a href> is enough -- no JS bridge needed. Whitelist the scheme to block
+// javascript:/data: hrefs from a malicious citation, and escape every field.
+function addSearchSources(items){
+  const list=(items||[]).filter(x=>x && typeof x==="object");
+  if(!list.length) return null;
+  const seen=new Set(), links=[];
+  list.forEach(c=>{
+    let url="";
+    try{ const u=new URL(String(c.url||"")); if(u.protocol==="http:"||u.protocol==="https:") url=u.href; }catch(_){}
+    if(!url || seen.has(url)) return;
+    seen.add(url);
+    const title=String(c.title||"").trim() || url;
+    const host=(()=>{ try{ return new URL(url).hostname.replace(/^www\./,""); }catch(_){ return ""; } })();
+    links.push('<a class="srcLink" href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">'+
+      '<span class="srcTitle">'+esc(title)+'</span>'+
+      (host?'<span class="srcHost">'+esc(host)+'</span>':'')+
+      '<svg class="ic srcGo"><use href="#i-send"/></svg></a>');
+  });
+  if(!links.length) return null;
+  const d=document.createElement("details");
+  d.className="det srcDet"; d.open=true;
+  d.innerHTML='<summary>'+icon("i-globe")+'<span>搜索来源（'+links.length+'）</span>'+
+    '<svg class="ic caret" style="width:15px;height:15px"><use href="#i-chev"/></svg></summary>'+
+    '<div class="dbody">'+links.join("")+'</div>';
+  $("chatLog").appendChild(d); setEmpty(false); scrollLog();
+  return d;
+}
 function fmtNum(n){ return (n||0).toLocaleString("zh-CN"); }
 /* ---------- live run meter ---------- */
 function startRunMeter(){
@@ -1660,6 +1697,14 @@ function handleEvent(name, data){
       if (String(data.text||"").trim()) runGotMessage = true;
       break;
     }
+    case "sources": {
+      // Structured web-search citations. Rendered as a tappable title list;
+      // the WebView sends external links to the browser. The legacy plain-text
+      // `tool` event ("联网搜索来源") is intentionally not shown here to avoid
+      // duplicating the same sources twice.
+      addSearchSources(data && data.items);
+      break;
+    }
     // The server only emits `reasoning` when thinking is actually enabled, so
     // show it unconditionally (pure-chat quick toggle included).
     case "reasoning": {
@@ -1670,7 +1715,13 @@ function handleEvent(name, data){
     }
     case "command": addProcStep("$ " + (data.command||"") + (data.exit!=null ? "  → "+data.exit : ""), data.output || "(无输出)"); break;
     case "files": addProcStep("文件变更 · " + (data.changes||[]).map(c=>c.path||c.kind||"?").join(", "), JSON.stringify(data.changes||[], null, 2)); break;
-    case "tool": addProcStep("工具 · " + (data.tool||""), data.status||""); break;
+    case "tool": {
+      // New server also emits structured `sources`; skip the legacy plain-text
+      // mirror so sources aren't shown twice. Old servers/records that only
+      // send this text still display it as before.
+      if ((data.tool||"") === "联网搜索来源" && String(data.status||"").indexOf(" — ")>=0) break;
+      addProcStep("工具 · " + (data.tool||""), data.status||""); break;
+    }
     case "usage": {
       const u=normUsage(data);
       usageTotals.input+=u.input; usageTotals.cached+=u.cached;
@@ -2542,6 +2593,21 @@ function renderSessionHistory(turns){
       setAssistantText(el, msgs.map(m=>m.data.text).join("\n\n"));
     } else if (errs.length){
       const el=addAssistant(tid); setAssistantText(el, "⚠️ "+errs[0].data.message);
+    }
+    // Web-search sources: prefer the structured event; fall back to parsing
+    // the legacy "标题 — URL" text so old turns keep their clickable links.
+    let srcEv=evs.find(e=>e.event==="sources" && e.data && e.data.items);
+    if (srcEv){
+      addSearchSources(srcEv.data.items);
+    } else {
+      const legacy=evs.find(e=>e.event==="tool" && e.data && e.data.tool==="联网搜索来源");
+      if (legacy){
+        const items=String(legacy.data.status||"").split("\n").map(line=>{
+          const p=line.split(" — "); const url=p[p.length-1]||"";
+          return {title:p.slice(0,-1).join(" — ")||url, url:url};
+        }).filter(x=>x.url);
+        if (items.length) addSearchSources(items);
+      }
     }
   });
   setEmpty(!(turns||[]).length); scrollLog();

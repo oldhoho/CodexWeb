@@ -1898,14 +1898,23 @@ class Runner:
         # where the answer came from (the same info DeepSeek Chat shows).
         if citations:
             seen = set()
+            sources = []
             src_lines = []
             for c in citations:
                 u_ = c.get("url") or ""
                 if not u_ or u_ in seen:
                     continue
                 seen.add(u_)
-                src_lines.append("%s — %s" % (c.get("title") or u_, u_))
-            if src_lines:
+                title_ = c.get("title") or u_
+                sources.append({"title": title_, "url": u_})
+                src_lines.append("%s — %s" % (title_, u_))
+            if sources:
+                # Structured event so the UI can render each source as a
+                # clickable title that opens in the system browser. Kept in
+                # the persisted transcript, so history/replay keeps the links.
+                self.emit(job, "sources", {"items": sources[:12]})
+                # Legacy plain-text event: review page and older clients still
+                # read it. Safe to keep -- it costs no cached prompt bytes.
                 self.emit(job, "tool", {"tool": "联网搜索来源",
                                         "status": "\n".join(src_lines[:12])})
         # Emit a normalised usage event so token stats/review keep working.
