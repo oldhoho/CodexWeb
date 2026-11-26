@@ -102,6 +102,19 @@ COMPACT_SNAP_FILE = "compact_snap.json"  # frozen summary anchor, inside .cxweb/
 # Once a session enables 联网搜索 we keep `tools` declared for good and use
 # tool_choice:"none" to switch actual browsing off, so the prefix stays stable.
 TOOLS_STICKY_KEY = "tools_on"
+# A fixed, byte-stable system note declaring the web-search capability.
+# Declaring `tools` enables the tool but does NOT tell the model it can browse:
+# asked "can you search the web?", a bare API call falls back to the model's
+# training persona ("I cannot access the internet"). DeepSeek's own web/app
+# answers "yes" because its system prompt declares the capability. This note
+# mirrors that. It is emitted ONLY when tools_on (session-sticky), so it stays
+# byte-identical on every turn after the first search enable and cannot
+# fragment the cached prefix. Never key it on the per-turn toggle.
+WEB_SEARCH_CAPABILITY = (
+    "【联网能力】你已具备服务端联网搜索能力（deepseek_web_search 工具已启用）。"
+    "当问题涉及时效性、最新信息或需要核实外部事实时，你可以自主联网检索并附上来源作答。"
+    "是否搜索由你根据问题本身判断，无需向用户确认。"
+)
 # DeepSeek's official web-tools guide states prior turns' thinking does NOT
 # enter later context ("之前轮次的思考不会进入后续轮次的上下文，只保留回答正文")
 # and reasoning_content is NOT required when `tools` is declared. Replaying it
@@ -1683,7 +1696,7 @@ class Runner:
         messages, parts, ctxinfo = build_cacheable_context(
             sid, caps, with_reminder=use_reminder,
             system_prompt=str(ctx.get("system_prompt") or ""),
-            instructions=instr_lines)
+            instructions=instr_lines, web_search_capable=tools_on)
         # Record injections so the review view stays honest.
         inj = ctx.setdefault("injections", [])
         for p in parts:
@@ -2834,7 +2847,7 @@ def reminder_msg(ts=None):
 
 
 def build_cacheable_context(sid, caps, with_reminder=False, system_prompt="",
-                            instructions=None):
+                            instructions=None, web_search_capable=False):
     """Assemble pure-chat messages with a STABLE PREFIX so provider-side
     context caching actually hits (DeepSeek charges ~1/10 for cache hits).
 
@@ -2875,6 +2888,14 @@ def build_cacheable_context(sid, caps, with_reminder=False, system_prompt="",
         if lines:
             blocks.append("\n\n".join(lines))
             parts.append("模式补充指令")
+    # 0c) Web-search capability note. tools_on is session-sticky, so once this
+    #     note appears it is present byte-for-byte on every later turn -- the
+    #     cached prefix survives 联网搜索 on/off toggles. Without it the model
+    #     answers "can you search?" from its offline training persona even
+    #     though deepseek_web_search is actually declared (user complaint).
+    if web_search_capable:
+        blocks.append(WEB_SEARCH_CAPABILITY)
+        parts.append("联网能力声明")
 
     # 1) Frozen memory block (only changes when the user edits MEMORY.md).
     if caps.get("memory"):
