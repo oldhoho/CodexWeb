@@ -72,6 +72,10 @@ WORK_MODES = {
     # the compiled files, so they enter the frozen prefix byte-stably.
     "secretary": {"effort": "low", "tools": False},
 }
+# Modes that call the provider directly (no Codex CLI, no shell/tools).
+# Secretary belongs here: its persona/human memory is injected by _run_direct.
+# Routing it to Codex made it burn tool rounds and hit the 24-step cap.
+DIRECT_MODES = ("chat", "secretary")
 DIRECT_CHAT_MODEL = "deepseek-flash"  # pure-chat calls the configured model directly (V4.1: thinking + web search)
 CTX_DIR = ".cxweb"                  # per-session context-review records
 PIN_FILE = os.path.join(ROOT, "pin")
@@ -1748,7 +1752,8 @@ class Runner:
         explicit = [i for i in (job.get("ctx", {}).get("injections") or [])
                     if isinstance(i, dict)]
         if not base or not key:
-            self.emit(job, "error", {"message": "纯对话需要先在「设置 → 模型与 API」配置 Key 与 Base URL"})
+            label = "秘书" if str(job.get("ctx", {}).get("mode") or "") == "secretary" else "纯对话"
+            self.emit(job, "error", {"message": label + "需要先在「设置 → 模型与 API」配置 Key 与 Base URL"})
             self._finish(job, None, "")
             return
         ctx = job.setdefault("ctx", {})
@@ -2187,8 +2192,11 @@ class Runner:
 
     def _dispatch(self, job):
         mode = job.get("ctx", {}).get("mode")
-        # Pure-chat mode bypasses Codex entirely.
-        if mode == "chat":
+        # Lean direct modes bypass Codex entirely. `secretary` is one of them:
+        # v75 registered the mode and injected its compiled memory in
+        # _run_direct, but _dispatch still fell through to `codex exec`, so a
+        # simple question triggered 24 shell commands and the tool-round cap.
+        if mode in DIRECT_MODES:
             self._run_direct(job)
             return
         # Phone control orchestrates user-authored skill modules (no Codex).

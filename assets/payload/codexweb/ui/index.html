@@ -716,7 +716,7 @@ svg{display:block;flex-shrink:0}
         <span>💰</span><span class="bBal" id="balanceVal">余额 …</span>
         <span class="bSub" id="balanceSub">DeepSeek</span>
       </div>
-      <div class="verRow">v75 · 本机 proot 运行</div>
+      <div class="verRow">v76 · 本机 proot 运行</div>
     </div>
   </aside>
   <div class="drawerMask" id="drawerMask"></div>
@@ -2386,7 +2386,7 @@ async function send(){
     // Plain modes use the provider's REAL server-side capabilities: the
     // `think`/`search` booleans become `thinking` + the web-search tool. The
     // entries below are honest audit notes, not fake text injections.
-    if (workMode==="chat"){
+    if (workMode==="chat" || workMode==="secretary"){
       if (cfg.think) injections.push({kind:"深度思考", text:"已启用服务端深度思考（thinking 参数），模型先推理再作答。"});
       if (cfg.search) injections.push({kind:"联网搜索", text:"已启用服务端联网搜索（deepseek_web_search 工具）；是否搜索由模型根据问题判断，日期/地点由 latest_reminder 元信息提供。"});
       // NOTE: do NOT inject any "please search" text or today's date into the
