@@ -2132,19 +2132,12 @@ async function send(){
     // entries below are honest audit notes, not fake text injections.
     if (workMode==="chat"){
       if (cfg.think) injections.push({kind:"深度思考", text:"已启用服务端深度思考（thinking 参数），模型先推理再作答。"});
-      if (cfg.search){
-        // DeepSeek leaves browsing to the model's own judgement ("是否联网由模型判断").
-        // Merely declaring deepseek_web_search is NOT enough: for date/news/price
-        // questions the model often answers from stale training memory (e.g. claiming
-        // "today is 2026-05-07"). Inject an explicit MUST-SEARCH directive into the
-        // actual prompt plus the real local date, so browsing is truly triggered and
-        // there is a fallback even if the model skips the tool.
-        const _d=new Date();
-        const _today=_d.getFullYear()+"年"+(_d.getMonth()+1)+"月"+_d.getDate()+"日";
-        const force="【必须联网搜索】回答前先调用联网搜索工具（deepseek_web_search）核实时效信息（当前日期、新闻、价格、赛事、政策等），不要仅凭记忆或训练数据作答。今天的真实日期是 "+_today+"。如确实无法联网，请如实说明，不要编造。\n\n";
-        out=force+out;
-        injections.push({kind:"联网搜索", text:force.trim()});
-      }
+      if (cfg.search) injections.push({kind:"联网搜索", text:"已启用服务端联网搜索（deepseek_web_search 工具）；是否搜索由模型根据问题判断，日期/地点由 latest_reminder 元信息提供。"});
+      // NOTE: do NOT inject any "please search" text or today's date into the
+      // prompt. DeepSeek decides browsing itself and supplies the real date via
+      // the official `latest_reminder` message (added server-side). Textual
+      // directives would pollute the cacheable prompt prefix and are ignored
+      // anyway -- this mirrors the official open-source chat-demo exactly.
     }
   } else {
     if (cfg.think){ out = "[推理要求] " + thinkText + "\n\n" + out;
@@ -3738,7 +3731,7 @@ async function renderGuide(){
 <ul>
   <li><b>全能</b>（出厂默认）：高强度推理（high）+ 深度思考 + 联网 + 系统词 —— 极致能力，Token 最高。注意：本机国内网络无法直连外网，Codex 内置的外网抓取工具不可用；需要联网请改用纯对话 + 联网搜索。</li>
   <li><b>轻量</b>（出厂默认）：低推理（low）+ 系统词 —— 日常平衡。</li>
-  <li><b>纯对话</b>（出厂默认）：极简推理（minimal→服务端 low），默认零注入、极致省 Token。顶部的<b>深度思考 / 联网搜索</b>开关是<b>真实 API 能力</b>：深度思考启用 DeepSeek 的 <code>thinking</code>（先推理再答，可展开思考过程），强度按模式映射（minimal/low→low，medium/high→high，max→max）；联网搜索启用 <code>deepseek_web_search</code> 服务端联网，搜索在 DeepSeek 服务器执行、<b>国内网络可用</b>，回答附来源引用。开启后会在提问前加上"必须联网、今天真实日期"的强指令，确保模型真的去搜、不再凭旧记忆回答日期/时效问题。需官方 deepseek-flash 模型。你也可给它单独勾选系统词，但会失去"零行李"优势。</li>
+  <li><b>纯对话</b>（出厂默认）：极简推理（minimal→服务端 low），默认零注入、极致省 Token。顶部的<b>深度思考 / 联网搜索</b>开关是<b>真实 API 能力</b>：深度思考启用 DeepSeek 的 <code>thinking</code>（先推理再答，可展开思考过程），强度按模式映射（minimal/low→low，medium/high→high，max→max）；联网搜索启用 <code>deepseek_web_search</code> 服务端联网，搜索在 DeepSeek 服务器执行、<b>国内网络可用</b>，回答附来源引用。当前日期/星期/地点/语言按 DeepSeek 官方做法通过 <code>latest_reminder</code> 元信息传给模型（随历史回传、不污染缓存），因此模型能正确知道"今天"，不再凭旧记忆作答；是否真的联网由模型按问题自行判断（这是官方 API 的设计，无法强制指定）。需官方 deepseek-flash 模型。你也可给它单独勾选系统词，但会失去"零行李"优势。</li>
   <li class="hint" style="list-style:none;margin-left:-18px"><b>缓存稳定性</b>：会话首次开启联网搜索后，搜索工具定义会<b>在本会话内固定保留</b>，之后关闭开关只禁用实际联网（<code>tool_choice:none</code>），不再改动提示词前缀——反复切换模式/开关不会让缓存命中归零。历史轮次的思考过程会按预算回传给 API，以满足带工具请求的多轮要求。</li>
   <li><b>手机控制</b>（出厂默认）：不走 Codex，也<b>不能自由操控手机</b>；用一次轻量直连调用，从你自制的技能模块里挑一个流程、填好参数，再按白名单确定性执行（详见下节）。</li>
   <li><b>自定义</b>（出厂默认）：逐项选择推理强度、深度思考、联网、系统词注入 —— 按需组合。你还可以把它改名成任意用途（如"写周报""审合同"），并绑定专属系统词，相当于一个自定义角色模式。</li>

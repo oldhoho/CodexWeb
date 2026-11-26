@@ -1590,6 +1590,11 @@ class Runner:
         import ssl
         base = configured_base_url().rstrip("/")
         key = load_api_key()
+        # DeepSeek's official `latest_reminder` tells the model the real date /
+        # weekday / platform / language before each turn (how the web/app does
+        # it). Only emit on the official host -- other OpenAI-compatible
+        # providers reject the unknown message role with 400.
+        use_reminder = is_deepseek_endpoint(base)
         # Snapshot the client-supplied instructions BEFORE the memory/compact
         # enrichment below appends its own entries to ctx["injections"].
         explicit = [i for i in (job.get("ctx", {}).get("injections") or [])
@@ -1620,7 +1625,8 @@ class Runner:
         # reuse the cached prefix. See build_cacheable_context().
         if caps.get("memory") or caps.get("compact"):
             messages, parts, ctxinfo = build_cacheable_context(sid, caps,
-                                                               include_reasoning=tools_on)
+                                                               include_reasoning=tools_on,
+                                                               with_reminder=use_reminder)
             # Record injections so the review view stays honest.
             ctx = job.setdefault("ctx", {})
             inj = ctx.setdefault("injections", [])
@@ -1649,6 +1655,12 @@ class Runner:
                     lines.append("[%s] %s" % (kind, text))
             if lines:
                 messages.append({"role": "system", "content": "\n\n".join(lines)})
+        # Current turn: real date marker immediately before the user message,
+        # exactly like the official client. Use this turn's ts.
+        if use_reminder:
+            rm = reminder_msg(job.get("ctx", {}).get("ts"))
+            if rm:
+                messages.append(rm)
         messages.append({"role": "user", "content": job["prompt"]})
         # Pre-flight total input cap: the sum of system/enrichment/history/user
         # must stay bounded. recent_history already enforces its own budget, but
@@ -2720,7 +2732,47 @@ def summarize_turns(turns):
     return text
 
 
-def build_cacheable_context(sid, caps, include_reasoning=False):
+_WEEKDAY_CN = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+
+
+def is_deepseek_endpoint(base):
+    """True only for the official DeepSeek API host. The `latest_reminder`
+    message role is a DeepSeek extension -- third-party OpenAI-compatible
+    endpoints would reject an unknown role with 400, so only emit it here."""
+    try:
+        host = urllib.parse.urlparse(str(base or "")).hostname or ""
+    except Exception:
+        host = ""
+    return host == "api.deepseek.com" or host.endswith(".deepseek.com")
+
+
+def latest_reminder_text(ts=None):
+    """DeepSeek 用户元信息标记: `YYYY-MM-DD,星期X,,App,中文`.
+
+    The official web/app sends one of these before every user turn so the
+    model knows the real date/weekday/location/language. Format is defined at
+    https://api-docs.deepseek.com/zh-cn/guides/latest_reminder/ . Fixed UTC+8
+    (the app targets China mobile users) so it does not depend on the guest's
+    TZ. Passing a turn's own `ts` replays the date that turn was sent, which
+    keeps the cached prefix byte-stable across turns."""
+    try:
+        t = time.time() if ts is None else float(ts)
+        # China Standard Time, independent of the Alpine guest's TZ setting.
+        d = time.gmtime(t + 8 * 3600)
+        date = "%04d-%02d-%02d" % (d.tm_year, d.tm_mon, d.tm_mday)
+        weekday = _WEEKDAY_CN[d.tm_wday]
+        # location intentionally empty; platform=App; language=中文 (native name).
+        return "%s,%s,,App,中文" % (date, weekday)
+    except Exception:
+        return ""
+
+
+def reminder_msg(ts=None):
+    text = latest_reminder_text(ts)
+    return {"role": "latest_reminder", "content": text} if text else None
+
+
+def build_cacheable_context(sid, caps, include_reasoning=False, with_reminder=False):
     """Assemble pure-chat messages with a STABLE PREFIX so provider-side
     context caching actually hits (DeepSeek charges ~1/10 for cache hits).
 
@@ -2737,6 +2789,10 @@ def build_cacheable_context(sid, caps, include_reasoning=False):
     include_reasoning: attach each turn's stored reasoning_content to its
     assistant message (required by DeepSeek when `tools` is declared). Off by
     default so a never-searched session sends nothing extra.
+    with_reminder: prepend a DeepSeek `latest_reminder` message before each
+    historical user turn (using that turn's ts) so the model sees the real
+    date and the cached prefix stays byte-stable. Only pass True on official
+    DeepSeek endpoints (other providers reject the unknown role).
     Returns (messages, injection_parts, info)."""
     turns = list_context(sid, limit=400)          # chronological, oldest first
     parts = []
@@ -2807,6 +2863,14 @@ def build_cacheable_context(sid, caps, include_reasoning=False):
     for t in raw_turns:
         u = str(t.get("user_input") or "").strip()
         if u:
+            # Replay each historical turn's own date marker before its user
+            # message (official DeepSeek pattern). Using the turn's stored ts
+            # keeps these bytes frozen -- appending new turns never rewrites
+            # them, so the cached prefix stays valid.
+            if with_reminder:
+                rm = reminder_msg(t.get("ts"))
+                if rm:
+                    raw_msgs.append(rm)
             raw_msgs.append({"role": "user", "content": u[:12000]})
         ans = ""
         for e in (t.get("events") or []):
