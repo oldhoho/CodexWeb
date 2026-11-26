@@ -1552,7 +1552,8 @@ function addSearchSources(items){
   });
   if(!links.length) return null;
   const d=document.createElement("details");
-  d.className="det srcDet"; d.open=true;
+  // Collapsed by default: sources are optional detail, not the main answer.
+  d.className="det srcDet"; d.open=false;
   d.innerHTML='<summary>'+icon("i-globe")+'<span>搜索来源（'+links.length+'）</span>'+
     '<svg class="ic caret" style="width:15px;height:15px"><use href="#i-chev"/></svg></summary>'+
     '<div class="dbody">'+links.join("")+'</div>';
