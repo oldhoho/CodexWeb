@@ -129,6 +129,13 @@ svg{display:block;flex-shrink:0}
 .dot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(34,197,94,.15)}
 .dot.bad{background:var(--err)}
 .verRow{margin-top:4px;padding-left:14px;font-size:10.5px;color:var(--caption);font-family:var(--mono)}
+.balanceRow{display:flex;align-items:center;gap:6px;margin-top:6px;padding:6px 9px;border-radius:8px;
+  background:var(--brand-50);font-size:11px;font-family:var(--mono);color:var(--brand-text);
+  cursor:pointer;user-select:none;transition:background .15s}
+.balanceRow:hover{background:var(--hover)}
+.balanceRow .bBal{font-weight:700}
+.balanceRow .bSub{color:var(--caption);font-size:10px;margin-left:auto}
+.balanceRow.bad{color:var(--err);background:transparent}
 
 /* ---------- main / topbar ---------- */
 .main{position:relative;display:flex;flex-direction:column;flex:1;min-width:0;background:var(--bg)}
@@ -691,7 +698,11 @@ svg{display:block;flex-shrink:0}
     </div>
     <div class="sideFoot">
       <div class="statusRow"><i class="dot" id="statusDot"></i><span id="statusText">连接中…</span></div>
-      <div class="verRow">v55 · 本机 proot 运行</div>
+      <div class="balanceRow" id="balanceRow" title="点击刷新余额">
+        <span>💰</span><span class="bBal" id="balanceVal">余额 …</span>
+        <span class="bSub" id="balanceSub">DeepSeek</span>
+      </div>
+      <div class="verRow">v{{APP_VERSION}} · 本机 proot 运行</div>
     </div>
   </aside>
   <div class="drawerMask" id="drawerMask"></div>
@@ -1070,6 +1081,13 @@ function favList(){ return Array.isArray(cfgState.config.favorites) ? cfgState.c
 function favIdSet(){ return new Set(favList().map(f=>f && f.id).filter(Boolean)); }
 // full-capabilities toggles (mirrored from backend caps.json)
 let caps = {memory:true, compact:true, auto_title:true, smart_mode:true};
+// 智能模式提醒策略（共享配置，两端一致）：
+//   off      不提醒
+//   cautious 仅当前模式确实缺所需能力、且助手明说做不到时提醒（默认）
+//   eager    识别到工具意图就提醒（旧行为）
+// preferred = 优先建议的模式 key，"auto" = 按能力自动挑。
+const SUGGEST_DEFAULT = {policy:"cautious", preferred:"auto"};
+let suggestCfg = Object.assign({}, SUGGEST_DEFAULT);
 async function loadCaps(){ try{ const r=await api("GET","/api/capabilities"); caps=r.caps||caps; }catch(e){} return caps; }
 // Work modes. Internal KEYS are stable and fixed (backend routes on them:
 // chat = direct API, device = skill orchestration, everything else = Codex CLI,
@@ -1148,6 +1166,13 @@ let workMode = localStorage.getItem("cx.workMode") || "chat";
 if (!MODE_DEFAULTS[workMode]) workMode = "chat";
 // running token usage accumulator (for the usage chip / review)
 let usageTotals = {input:0, cached:0, output:0, turns:0};
+// 实测（build/_cache_switch_test.py）：同一会话内切换 thinking 会让请求顶层
+// 参数 (thinking/reasoning_effort) 改变，KV 缓存前缀失配、当轮命中归零；
+// 历史 append-only + system 每轮重建，所以破坏是一次性的，下一轮即恢复。
+// 但长会话里那「一轮」要重算整段前缀，代价随已缓存 token 增长。低于阈值时
+// 切换很便宜，不打扰用户；超过则先弹确认，让人知道自己在花什么钱。
+const CACHE_SWITCH_WARN_TOKENS = 2000;
+function cacheIsWorthProtecting(){ return (usageTotals.cached||0) >= CACHE_SWITCH_WARN_TOKENS; }
 // terminal state
 let termHistory = [], termHistIdx = 0, termBusy = false;
 
@@ -1195,6 +1220,13 @@ async function applySharedConfig(seed){
     // First run: migrate local modeDefs into the shared config.
     try{ await saveConfig({modeDefs:modeDefs}); }catch(e){}
   }
+  const sc=c.suggestMode;
+  if (sc && typeof sc==="object"){
+    suggestCfg.policy = ["off","cautious","eager"].includes(sc.policy) ? sc.policy : "cautious";
+    suggestCfg.preferred = MODE_DEFAULTS[sc.preferred] ? sc.preferred : "auto";
+  } else if (seed) {
+    try{ await saveConfig({suggestMode:suggestCfg}); }catch(e){}
+  }
   const ps=c.prompts;
   if (Array.isArray(ps) && ps.length){
     const list=ps.filter(p=>p&&p.id).map(p=>({id:String(p.id),name:String(p.name||"未命名预设"),text:String(p.text||"")}));
@@ -1225,6 +1257,10 @@ async function saveConfig(patch){
   }
   await loadConfig();
   throw new Error("配置并发冲突，已重新载入，请再试一次");
+}
+function saveSuggestCfg(){
+  saveConfig({suggestMode:suggestCfg})
+    .catch(e=>toast("提醒策略同步失败："+e.message));
 }
 function favIdsNow(){ return favIdSet(); }
 function markFavButton(el){
@@ -1633,10 +1669,61 @@ function renderUsageChip(){
   // `total` is not accumulated anywhere; derive it from input+output so the
   // chip never shows 0 while the hit-rate (cached/input) is correct.
   const totalTok=(usageTotals.input||0)+(usageTotals.output||0);
-  c.textContent="↯ "+fmtNum(totalTok)+" tok · 命中 "+rate+"%";
+  c.textContent="↯ "+fmtNum(totalTok)+" tok · 命中 "+rate+"%"+
+    (cacheIsWorthProtecting()?" ⚑":"");
   c.title="累计 "+usageTotals.turns+" 轮 · 输入 "+fmtNum(usageTotals.input)+
     "（缓存 "+fmtNum(usageTotals.cached)+"）· 输出 "+fmtNum(usageTotals.output)+
+    "\n⚑ 表示本会话缓存已成形：切换深度思考或工作模式会让下一轮命中归零，"+
+    "切换稳定后从再下一轮恢复；联网搜索开关不影响缓存。"+
     "\n点击查看会话历史审查";
+}
+// ---- account balance (DeepSeek /user/balance, proxied by backend) --------
+const BALANCE_REFRESH_MS = 5 * 60 * 1000;
+let balanceBusy = false;
+function balanceSym(cur){ return cur==="USD" ? "$" : "¥"; }
+function paintBalance(r){
+  const row=$("balanceRow"), val=$("balanceVal"), sub=$("balanceSub");
+  if(!row||!val||!sub) return;
+  row.classList.remove("bad");
+  row.title="点击刷新余额";
+  if(!r || !r.ok){
+    val.textContent="余额 —";
+    // Mobile WebView has no hover, so title alone is invisible. Put the real
+    // reason inline: unsupported endpoint vs key/network error vs old backend.
+    sub.textContent = r && r.unsupported ? "仅官方接口支持"
+      : (r && r.error ? String(r.error).slice(0,14) : "查询失败·点击重试");
+    row.classList.add("bad");
+    row.title=(r&&r.error)||"点击刷新余额";
+    return;
+  }
+  const items=(r.items||[]).filter(x=>x && x.currency);
+  if(!items.length){
+    val.textContent="余额 —"; sub.textContent="无数据"; return;
+  }
+  // Multiple currencies are shown one per line via title; main shows the first.
+  const main=items[0];
+  val.textContent=balanceSym(main.currency)+Number(main.total||0).toFixed(2)+
+    (main.currency==="USD"?" USD":"");
+  const more = r.available===false ? " · 余额不足" : "";
+  sub.textContent=items.length>1
+    ? items.map(x=>balanceSym(x.currency)+(Number(x.total||0).toFixed(0))).join(" / ")+more
+    : (main.currency+more);
+  row.title="总余额（含赠金 "+balanceSym(main.currency)+Number(main.granted||0).toFixed(2)+
+    " · 充值 "+balanceSym(main.currency)+Number(main.topped_up||0).toFixed(2)+"）"+
+    (items.length>1?"\n"+items.slice(1).map(x=>x.currency+" "+Number(x.total||0).toFixed(2)).join("\n"):"")+
+    "\n点击刷新";
+}
+async function refreshBalance(silent){
+  if(balanceBusy) return;
+  balanceBusy=true;
+  try{
+    const r=await api("GET","/api/balance",undefined,20000);
+    paintBalance(r);
+    if(!silent && r && r.error) toast("余额： "+r.error);
+  }catch(e){
+    paintBalance({ok:false,error:e.message});
+    if(!silent) toast("余额查询失败： "+e.message);
+  }finally{ balanceBusy=false; }
 }
 // Keep exactly ONE per-turn usage card in the transcript (the latest one).
 // Older cards are removed; the full history stays in the review page.
@@ -1881,6 +1968,14 @@ function applyRemoteMeta(m){
     const wantMode = MODE_DEFAULTS[m.mode] ? m.mode : workMode;
     const wantThink = typeof m.think==="boolean" ? m.think : null;
     const wantSearch = typeof m.search==="boolean" ? m.search : null;
+    // 服务端把覆盖清成 null 时，必须同步删掉本机会话残留。否则下次
+    // loadQuickOverrides() 会从 localStorage 把旧的 false 复活，压住模式默认
+    // （表现就是：启动器里把纯对话联网设为开，切回 Web 又变关）。
+    // 这一步必须在早退之前：即便 UI 状态没变化，也要清掉残留。
+    for (const [kind,v] of [["think",wantThink],["search",wantSearch]]){
+      if (typeof v==="boolean") localStorage.setItem(quickKey(kind), v?"1":"0");
+      else localStorage.removeItem(quickKey(kind));
+    }
     if (wantMode===workMode && wantThink===quickThink && wantSearch===quickSearch) return;
     workMode=wantMode; localStorage.setItem("cx.workMode",workMode);
     quickThink=wantThink; quickSearch=wantSearch;
@@ -1927,6 +2022,8 @@ function safeRepaintSettings(){
   const editing=/^(cfgName|cfgDesc|promptName|promptText)$/.test(focusId);
   const keep=editing?{id:focusId,value:ae.value,start:ae.selectionStart,end:ae.selectionEnd}:null;
   renderMode(); renderPrompts();
+  // 提醒策略也在共享配置里，别的端改了要同步控件
+  if (typeof window.refreshSuggestControls==="function") window.refreshSuggestControls();
   if (keep){
     const el=document.getElementById(keep.id);
     if (el){
@@ -1962,31 +2059,72 @@ function startVisibilityPolling(){
   });
 }
 // ---- smart mode suggestion ---------------------------------------------
-// After several turns in pure-chat, detect tool/code intent in the history and
-// offer to switch to a mode that actually has tools. Shown at most once/session.
-const TOOL_INTENT_RE = /(代码|函数|文件|脚本|运行|执行|命令|报错|调试|编译|打包|抓包|反编译|apk|git|python|javascript|java|代码库|项目|改一下|帮我写|重构|修复|bug|终端|shell|正则|接口|api|数据库|sql)/i;
+// 策略由用户配置；能力判断以当前 modeDefs 为准，模式一改提醒就跟着变。
+//   cli    = 文件/命令/工具（由内部 key 决定：full/lite/custom 具备）
+//   search = 联网搜索（由模式里可编辑的 search 开关决定）
+const CLI_INTENT_RE = /(运行一下|执行一下|帮我(执行|运行|编译|打包|改文件|写文件|读文件)|写入文件|保存到文件|读取文件|修改文件|创建文件|删除文件|编译|打包|抓包|反编译|git\s+(commit|push|clone))/i;
+const SEARCH_INTENT_RE = /(联网搜|搜索一下|查一下最新|最新消息|实时数据|打开(网页|链接|网站))/i;
+const EXPLAIN_ONLY_RE = /(解释|什么是|为什么|区别|原理|什么意思|讲讲|翻译|润色|举个例子|这段代码)/i;
+const CAP_LIMIT_RE = /(无法|不能|没有(工具|权限|能力)|不支持|仅能|只能|受限|建议切换|需要切换|请切换|改用|换成)/;
+function modeCan(key, cap){
+  const c=modeDefs[key] || MODE_DEFAULTS[key] || {};
+  if (cap==="cli") return key==="full" || key==="lite" || key==="custom";
+  if (cap==="search") return !!c.search;
+  if (cap==="think") return !!c.think;
+  return false;
+}
+function neededCaps(text){
+  const out=[];
+  if (CLI_INTENT_RE.test(text)) out.push("cli");
+  if (SEARCH_INTENT_RE.test(text)) out.push("search");
+  return out;
+}
+function suggestTargets(miss){
+  return Object.keys(MODE_DEFAULTS)
+    .filter(k=>k!==workMode && miss.every(c=>modeCan(k,c)))
+    // 用户选的「优先建议模式」排最前，其余按定义顺序
+    .sort((a,b)=>(a===suggestCfg.preferred?-1:0)-(b===suggestCfg.preferred?-1:0));
+}
 async function maybeSuggestMode(){
-  if (workMode!=="chat" || !caps.smart_mode || !session || busy) return;
+  if (suggestCfg.policy==="off" || !session || busy) return;
   if (localStorage.getItem("cx.suggested."+session)) return;
   try{
     const r=await api("GET","/api/history?s="+encodeURIComponent(session));
     const msgs=r.messages||[];
-    const userTexts=msgs.filter(m=>m.role==="user").map(m=>m.content||"").join("\n");
     const turnCount=(r.turn_count||0);
-    if (turnCount < 5 || !TOOL_INTENT_RE.test(userTexts)) return;
+    if (turnCount < 4) return;
+    const recentUser=msgs.slice(-8).filter(m=>m.role==="user").map(m=>m.content||"").join("\n");
+    if (EXPLAIN_ONLY_RE.test(recentUser)) return;
+    // 关键：当前模式若已具备所需能力（例如用户把纯对话的联网打开了），不打扰。
+    const miss=neededCaps(recentUser).filter(c=>!modeCan(workMode,c));
+    if (!miss.length) return;
+    if (suggestCfg.policy==="cautious"){
+      // 保守档仍要求助手明说做不到，避免正常技术问答被误判。
+      const lastAssistant=[...msgs].reverse()
+        .find(m=>m.role==="assistant" && String(m.content||"").trim());
+      if (!lastAssistant || !CAP_LIMIT_RE.test(String(lastAssistant.content))) return;
+    }
+    const targets=suggestTargets(miss);
+    if (!targets.length) return;
     localStorage.setItem("cx.suggested."+session,"1");
     const el=addAssistant(); el.classList.add("modeSuggest");
-    el.innerHTML='<div class="msTitle">检测到多轮任务，且内容涉及代码 / 文件 / 工具操作。</div>'+
-      '<div class="msBody"></div>'+
-      '<div class="msBtns"><button class="btn primary" data-to="lite">切到轻量</button>'+
-      '<button class="btn" data-to="full">切到全能</button>'+
-      '<button class="btn" data-to="x">保持纯对话</button></div>';
+    const btns=targets.slice(0,2).map((k,i)=>
+      '<button class="btn'+(i===0?" primary":"")+'" data-to="'+k+'">切到'+esc(modeLabel(k))+'</button>'
+    ).join("")+'<button class="btn" data-to="x">保持当前模式</button>';
+    el.innerHTML='<div class="msTitle">当前模式缺少所需能力</div>'+
+      '<div class="msBody"></div><div class="msBtns">'+btns+'</div>';
+    const needName=miss.map(c=>c==="cli"?"文件 / 命令工具":"联网搜索").join(" + ");
     el.querySelector(".msBody").textContent =
-      "当前「纯对话」模式不含工具能力。切换到轻量/全能模式即可读写文件、执行命令与联网检索。";
+      "这一步需要 "+needName+"，当前模式没有。切到 "+targets.slice(0,2).map(modeLabel).join(" / ")+
+      " 即可继续；模式能力可在设置页自定义。";
     el.querySelectorAll(".msBtns button").forEach(b=>{
       b.onclick=()=>{
         const to=b.dataset.to;
-        if (to!=="x"){ setWorkMode(to); toast("已切换，接下来的消息将使用新能力"); }
+        if (to!=="x"){
+          setWorkMode(to, true);
+          toast("已切换，接下来的消息将使用新能力"+
+            (cacheIsWorthProtecting()?" · 下一轮缓存会重新计算":""));
+        }
         el.remove();
       };
     });
@@ -2008,8 +2146,17 @@ function loadQuickOverrides(){
   const s=(sessionsCache||[]).find(x=>x.id===session);
   const fromStore=(kind)=>{ const v=localStorage.getItem(quickKey(kind));
     return v===null ? null : v==="1"; };
-  quickThink = s && typeof s.think==="boolean" ? s.think : fromStore("think");
-  quickSearch = s && typeof s.search==="boolean" ? s.search : fromStore("search");
+  if (!s){
+    // 会话列表还没到：只把本机离线值当临时兜底。
+    quickThink=fromStore("think"); quickSearch=fromStore("search"); return;
+  }
+  // 服务端会话是权威。字段为 null 表示「跟随模式默认」，此时必须删掉
+  // 本机旧覆盖，否则 localStorage 会让已取消的 quick 开关原地复活。
+  quickThink = typeof s.think==="boolean" ? s.think : null;
+  quickSearch = typeof s.search==="boolean" ? s.search : null;
+  for (const [kind,v] of [["think",quickThink],["search",quickSearch]]){
+    if (typeof v!=="boolean") localStorage.removeItem(quickKey(kind));
+  }
 }
 function setWorkMode(mode, quiet){
   if(!MODE_DEFAULTS[mode]) return;
@@ -2019,16 +2166,31 @@ function setWorkMode(mode, quiet){
   localStorage.removeItem(quickKey("think")); localStorage.removeItem(quickKey("search"));
   const cached=(sessionsCache||[]).find(x=>x.id===session);
   if (cached){ cached.think=null; cached.search=null; }
-  renderMode(); if(!quiet) toast("已切换："+modeLabel(workMode));
+  renderMode();
+  if(!quiet) toast("已切换："+modeLabel(workMode)+
+    (cacheIsWorthProtecting()?" · 下一轮缓存会重新计算":""));
   if (session) updateSessionMeta(session,{mode:mode, think:null, search:null});
 }
 function toggleQuick(kind){
   const next = !effectiveModeCfg()[kind];
+  // 深度思考是「顶层请求参数」——切换会让 KV 缓存前缀失配，当轮命中归零。
+  // 缓存积累越多，这一轮重算越贵。短会话代价可忽略，不打扰；长会话先确认。
+  // 联网搜索不同：后端一旦开过就把工具 schema 做 session-sticky，开关只用
+  // tool_choice 控制本轮是否检索，schema 字节不变 —— 反复切不伤缓存，无需拦。
+  if (kind==="think" && cacheIsWorthProtecting()){
+    const cached=fmtNum(usageTotals.cached), rate=usageTotals.input?(100*usageTotals.cached/usageTotals.input).toFixed(0):"0";
+    if (!confirm("本会话已积累约 "+cached+" token 缓存（命中率 "+rate+"%）。\n\n"+
+      "切换「深度思考」会让下一轮缓存命中归零，整段历史输入按未命中价重新计费；"+
+      "稳定使用后从再下一轮起恢复。\n\n确定要切换吗？")) return;
+  }
   if (kind==="think") quickThink=next; else quickSearch=next;
   localStorage.setItem(quickKey(kind), next ? "1" : "0");
   if (session) updateSessionMeta(session,{[kind]:next});
   renderMode();
-  toast((next?"已开启":"已关闭")+"「"+(kind==="think"?"深度思考":"联网搜索")+"」"+(session?"（仅本会话）":""));
+  const note = kind==="think"
+    ? ((next?"已开启":"已关闭")+"「深度思考」（仅本会话）")
+    : ((next?"已开启":"已关闭")+"「联网搜索」——工具能力已在本会话锁定，开关只控制本轮是否检索，不影响缓存");
+  toast(note);
 }
 const EFFORT_LABEL={minimal:"极简",low:"低",medium:"中",high:"高"};
 function renderPromptIdOptions(){
@@ -2066,8 +2228,10 @@ function renderMode(){
   // session only. They work in pure-chat too (as an explicit instruction).
   $("tglThink").classList.toggle("on", !!eff.think);
   $("tglSearch").classList.toggle("on", !!eff.search);
-  $("tglThink").title=(eff.think?"点击关闭":"点击开启")+"深度思考（仅本会话）";
-  $("tglSearch").title=(eff.search?"点击关闭":"点击开启")+"联网搜索（仅本会话）";
+  $("tglThink").title=(eff.think?"点击关闭":"点击开启")+"深度思考（仅本会话）"+
+    (cacheIsWorthProtecting()?" · 切换会让下一轮缓存归零":"");
+  $("tglSearch").title=(eff.search?"点击关闭":"点击开启")+"联网搜索（仅本会话）"+
+    " · 工具能力已锁定，切换不影响缓存";
   $("tglThink").disabled=$("tglSearch").disabled=false;
   $("tglThink").style.opacity=$("tglSearch").style.opacity="1";
 }
@@ -2084,6 +2248,8 @@ $("cfgSearch").onchange=()=>editMode("search", $("cfgSearch").checked);
 $("cfgPrompt").onchange=()=>editMode("prompt", $("cfgPrompt").checked);
 $("cfgPromptId").onchange=()=>editMode("promptId", $("cfgPromptId").value);
 $("usageChip").onclick=()=>switchTool("review");
+$("balanceRow").onclick=()=>refreshBalance(false);
+setInterval(()=>{ refreshBalance(true); }, BALANCE_REFRESH_MS);
 
 // Resolve which system prompt this mode carries. No global/session layers:
 // the active mode's `prompt` switch + `promptId` fully decide injection.
@@ -3671,12 +3837,11 @@ async function renderSettings(){
     catch(e){ toast("当前环境无法打开系统设置"); }
     setTimeout(refreshBattery, 1500);
   };
-  // 完全体能力：记忆 / 压缩 / 自动标题 / 智能提醒
+  // 完全体能力：记忆 / 压缩 / 自动标题；模式提醒改为可配置策略
   const CAP_INFO=[
     ["memory","长期记忆","把本会话的 MEMORY.md 与最近对话注入请求，让 AI 记得上下文与你的偏好。"],
     ["compact","上下文压缩","历史较长时把旧对话压成摘要，兼顾记忆与省 Token。"],
     ["auto_title","自动标题","每条会话首轮对话后，自动用主题命名会话。"],
-    ["smart_mode","智能模式提醒","纯对话中多轮涉及代码/工具操作时，提示切换到更强的模式。"],
   ];
   let capsHtml='<div id="capRows">';
   CAP_INFO.forEach(([k,name,desc])=>{
@@ -3684,7 +3849,20 @@ async function renderSettings(){
       '<div class="capTxt"><b>'+name+'</b><span>'+desc+'</span></div>'+
       '<button class="toggle'+(caps[k]?" on":"")+'" data-cap="'+k+'"><span>'+(caps[k]?"开启":"关闭")+'</span></button></div>';
   });
-  capsHtml+='</div><div class="rowBtns" style="margin-top:12px">'+
+  capsHtml+='</div>'+
+    '<div class="capRow" style="margin-top:8px"><div class="capTxt"><b>智能模式提醒</b>'+
+    '<span>按当前模式的真实能力判断（模式自定义后立即生效），可关闭或调成主动识别。</span></div></div>'+
+    '<div class="rowBtns" id="suggestPolicy">'+
+      '<button class="btn" data-sp="off">关闭</button>'+
+      '<button class="btn" data-sp="cautious">仅能力不足</button>'+
+      '<button class="btn" data-sp="eager">主动识别</button></div>'+
+    '<div class="capRow" style="margin-top:8px"><div class="capTxt"><b>优先建议模式</b>'+
+    '<span>缺能力时优先推荐这个模式；「自动」按能力顺序挑。</span></div>'+
+    '<select class="field" id="suggestPreferred" style="max-width:130px">'+
+      '<option value="auto">自动</option>'+
+      Object.keys(MODE_DEFAULTS).map(k=>'<option value="'+k+'">'+esc(modeLabel(k))+'</option>').join("")+
+    '</select></div>'+
+    '<div class="rowBtns" style="margin-top:12px">'+
     '<button class="btn" id="memEditBtn">编辑本会话记忆 (MEMORY.md)</button></div>'+
     '<div id="memEditor" style="display:none;margin-top:10px">'+
       '<textarea class="field" id="memText" rows="7" placeholder="每行一条长期记忆…"></textarea>'+
@@ -3701,6 +3879,28 @@ async function renderSettings(){
       catch(e){ toast(e.message); }
     };
   });
+  function paintSuggestControls(){
+    const box=capCard.querySelector("#suggestPolicy"); if(!box) return;
+    box.querySelectorAll("[data-sp]").forEach(b=>
+      b.classList.toggle("primary", b.dataset.sp===suggestCfg.policy));
+    const sel=capCard.querySelector("#suggestPreferred");
+    if(sel) sel.value=suggestCfg.preferred;
+  }
+  capCard.querySelectorAll("[data-sp]").forEach(b=>{
+    b.onclick=()=>{
+      suggestCfg.policy=b.dataset.sp; saveSuggestCfg(); paintSuggestControls();
+      toast("提醒策略已更新（两端同步）");
+    };
+  });
+  const prefSel=capCard.querySelector("#suggestPreferred");
+  if(prefSel){
+    prefSel.onchange=()=>{
+      suggestCfg.preferred=prefSel.value; saveSuggestCfg();
+      toast("优先建议模式已更新（两端同步）");
+    };
+  }
+  window.refreshSuggestControls=paintSuggestControls;
+  paintSuggestControls();
   const memEditor=capCard.querySelector("#memEditor"), memText=capCard.querySelector("#memText");
   capCard.querySelector("#memEditBtn").onclick=async()=>{
     if(!session){ toast("请先新建或打开一个会话"); return; }
@@ -3922,6 +4122,7 @@ async function boot(){
   catch(e){ toast(e.message); }
   renderFavPanel(); refreshFavButtons();
   startVisibilityPolling();
+  refreshBalance(true);   // account balance in sidebar footer (best-effort)
   switchTool(initialRoute);
 }
 (async function start(){

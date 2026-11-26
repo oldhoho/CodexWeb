@@ -43,9 +43,26 @@ done
 mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex" "$(dirname "$DIST")"
 
 echo "[apk] refresh payload from src/ (single source of truth)"
+# Keep the on-device payload-unpack stamp in sync with src/version. This Java
+# constant decides whether RuntimePayload re-extracts codexd.py/index.html on
+# upgrade; a stale value makes new APKs silently keep running the old payload
+# (e.g. a new /api/balance route never appears). Drift here caused v68-v70 to
+# ship without their payload ever reaching the device.
+APP_VER=$(tr -d '[:space:]' < "$ROOT/src/version")
+[ -n "$APP_VER" ] || { echo "src/version is empty" >&2; exit 1; }
+RP_JAVA="$ROOT/java/com/aishell/codexweb/RuntimePayload.java"
+if grep -q 'static final String VERSION = ' "$RP_JAVA"; then
+  sed -i -E "s/static final String VERSION = \"[0-9]+\";/static final String VERSION = \"$APP_VER\";/" "$RP_JAVA"
+else
+  echo "RuntimePayload.java VERSION constant not found" >&2; exit 1;
+fi
+echo "[apk] payload unpack stamp = $APP_VER"
 cp "$ROOT/src/backend/codexd.py" "$ROOT/assets/payload/codexweb/codexd.py"
 cp "$ROOT/src/guest/launch.sh" "$ROOT/assets/payload/codexweb/launch.sh"
 cp "$ROOT/src/frontend/index.html" "$ROOT/assets/payload/codexweb/ui/index.html"
+# Inject real version into the frontend placeholder so the sidebar shows the
+# actual build instead of a stale hardcoded number.
+sed -i -E "s/\{\{APP_VERSION\}\}/$APP_VER/g" "$ROOT/assets/payload/codexweb/ui/index.html"
 cp "$ROOT/src/version" "$ROOT/assets/payload/VERSION"
 for f in bin/proot bin/loader bin/loader-m32 bin/proot-loader; do
   [ -s "$ROOT/assets/payload/$f" ] || { echo "缺少 payload: $f" >&2; exit 1; }
@@ -98,4 +115,8 @@ echo "[apk] sign"
   --out "$DIST" "$OUT/app.aligned.apk"
 "$JAVA" -jar "$SIGNER_JAR" verify --print-certs "$DIST" | head -3
 ls -la "$DIST"
+# Keep dist lean: after a successful build, drop older CodexWeb-v<N> APKs and
+# older launcher archives. Unversioned CodexWeb.apk/.idsig stay as build output.
+echo "[apk] cleanup old APKs"
+python3 "$ROOT/tools/cleanup-apks.py" "$(dirname "$DIST")"
 echo "BUILD_OK $DIST"

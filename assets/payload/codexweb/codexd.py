@@ -1301,6 +1301,60 @@ def _turn_reasoning(events):
     return text
 
 
+def _turn_sources(events):
+    """Web-search sources of a persisted turn, as [{title, url}].
+
+    Same extraction as the Web frontend's renderSessionHistory(): prefer the
+    structured `sources` event; fall back to the legacy `tool("联网搜索来源",
+    "标题 — URL")` text mirror for old records. Called by recent_history() so
+    /api/history carries the exact same source list that /api/context shows --
+    native clients no longer need to reconstruct sources on their own.
+    """
+    items = []
+    seen = set()
+    for e in (events or []):
+        if not isinstance(e, dict) or e.get("event") != "sources":
+            continue
+        data = e.get("data")
+        if not isinstance(data, dict):
+            continue
+        for it in (data.get("items") or []):
+            if not isinstance(it, dict):
+                continue
+            url = str(it.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            items.append({"title": str(it.get("title") or "").strip() or url,
+                          "url": url})
+            if len(items) >= 12:
+                break
+        if items:
+            break
+    if not items:
+        for e in (events or []):
+            if not isinstance(e, dict) or e.get("event") != "tool":
+                continue
+            data = e.get("data")
+            if not isinstance(data, dict) or str(data.get("tool") or "") != "联网搜索来源":
+                continue
+            for line in str(data.get("status") or "").split("\n"):
+                parts = line.split(" — ")
+                if len(parts) < 2:
+                    continue
+                url = parts[-1].strip()
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                items.append({"title": " — ".join(parts[:-1]).strip() or url,
+                              "url": url})
+                if len(items) >= 12:
+                    break
+            if items:
+                break
+    return items
+
+
 def save_context(job):
     """Persist one turn's full transcript for the review view. Best-effort:
     review must never break chat. Never store the API key.
@@ -2739,6 +2793,11 @@ def recent_history(sid, n=None, char_budget=None, with_ids=False):
         tid = str(t.get("id") or "")
         ts = t.get("ts", 0)
 
+        # Sources are extracted once per turn (same data /api/context shows).
+        # Kept out of the model-facing payload: only the history view path
+        # (with_ids=True) attaches UI fields, so provider requests stay clean.
+        turn_sources = _turn_sources(t.get("events")) if with_ids else []
+
         def _msg(role, text):
             m = {"role": role, "content": text[:12000]}
             if with_ids:
@@ -2749,6 +2808,8 @@ def recent_history(sid, n=None, char_budget=None, with_ids=False):
                 m["id"] = (tid + ":" + suffix) if tid else ("t%s:%s" % (ts, suffix))
                 m["turnId"] = tid
                 m["ts"] = ts
+                if role == "assistant" and turn_sources:
+                    m["sources"] = turn_sources
             return m
 
         u = str(t.get("user_input") or "").strip()
@@ -3287,6 +3348,62 @@ def api_status(do_probe=False, testkey=""):
     return out
 
 
+def fetch_account_balance():
+    """Query DeepSeek's account balance with the stored key (never echoed).
+
+    GET https://api.deepseek.com/user/balance -> {is_available, balance_infos:[
+      {currency, total_balance, granted_balance, topped_up_balance}]}.
+
+    Only the official DeepSeek endpoint supports this route and the key must
+    stay server-side, so third-party OpenAI-compatible base URLs return an
+    explicit `unsupported` instead of leaking the key to an unknown host.
+    Errors are structured for the UI and never include the key or raw headers.
+    """
+    base = configured_base_url()
+    if not is_deepseek_endpoint(base):
+        return {"ok": False, "unsupported": True,
+                "error": "当前不是 DeepSeek 官方接口，余额查询仅官方端点支持"}
+    key = load_api_key()
+    if not key:
+        return {"ok": False, "error": "尚未配置 API Key"}
+    # Balance is a fixed official path; normalise any /v1 or trailing slash.
+    host = urllib.parse.urlsplit(base)
+    origin = host.scheme + "://" + host.netloc
+    url = origin + "/user/balance"
+    try:
+        req = urllib.request.Request(
+            url, headers={"Authorization": "Bearer " + key, "Accept": "application/json"},
+            method="GET")
+        cafile = "/etc/ssl/certs/ca-certificates.crt"
+        ssl_ctx = (ssl.create_default_context(cafile=cafile)
+                   if os.path.isfile(cafile) else ssl.create_default_context())
+        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
+            obj = json.loads(resp.read().decode("utf-8", "replace"))
+        infos = obj.get("balance_infos") if isinstance(obj.get("balance_infos"), list) else []
+        items = []
+        for it in infos:
+            if not isinstance(it, dict):
+                continue
+            items.append({
+                "currency": str(it.get("currency") or ""),
+                "total": str(it.get("total_balance") or ""),
+                "granted": str(it.get("granted_balance") or ""),
+                "topped_up": str(it.get("topped_up_balance") or ""),
+            })
+        return {"ok": True,
+                "available": bool(obj.get("is_available")),
+                "items": items}
+    except urllib.error.HTTPError as ex:
+        if ex.code == 401:
+            return {"ok": False, "error": "API Key 无效或已过期"}
+        if ex.code == 429:
+            return {"ok": False, "error": "查询过于频繁，请稍后再试"}
+        return {"ok": False, "error": "余额接口返回 HTTP %s" % ex.code}
+    except (urllib.error.URLError, OSError, ValueError) as ex:
+        log("balance query failed: %s" % ex)
+        return {"ok": False, "error": "余额查询失败，请检查网络后重试"}
+
+
 # ------------------------------------------------------------------ SSRF guard
 def public_ip(ip):
     return not (ip.is_private or ip.is_loopback or ip.is_link_local
@@ -3636,6 +3753,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/context":
             sid = q.get("s", [""])[0]
             return self.send_json({"session": sid, "turns": list_context(sid)})
+        if path == "/api/balance" and method == "GET":
+            # Reads the key server-side; only the status/amounts cross the wire.
+            return self.send_json(fetch_account_balance())
         # -- device bridge (AI -> native, whitelisted only) --------------------
         if path == "/api/device/submit" and method == "POST":
             b = self.json_body(64 * 1024)

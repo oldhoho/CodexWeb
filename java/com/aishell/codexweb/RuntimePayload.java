@@ -52,7 +52,7 @@ final class RuntimePayload {
     // Bump when payload assets change: it invalidates files/payload and the
     // extracted rootfs stamp so old copies are never reused.
     // Keep in sync with src/version (the build copies that file into the APK).
-    static final String VERSION = "67";
+    static final String VERSION = "74";
     static String flat(String name) {
         return name.replace('/', '_');
     }
