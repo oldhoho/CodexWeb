@@ -1809,7 +1809,7 @@ function stream(job){
   // Keep only the active job's retry state; drop stale ones on each new turn.
   for (const k in SSE_RETRY) if (k !== job) delete SSE_RETRY[k];
   es = new EventSource("/api/chat/stream?job=" + encodeURIComponent(job));
-  ["start","stream","message","reasoning","command","files","tool","todo","usage","error","log","end"].forEach(n=>{
+  ["start","stream","message","sources","reasoning","command","files","tool","todo","usage","error","log","end"].forEach(n=>{
     es.addEventListener(n, ev=>{
       let d={}; try{ d=JSON.parse(ev.data); }catch(e){}
       handleEvent(n,d);
