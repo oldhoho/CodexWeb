@@ -2124,9 +2124,14 @@ async function send(){
   // including 纯对话 — but only when the user explicitly enabled it on that
   // mode and picked a preset. By default 纯对话 carries nothing (zero luggage).
   const sys = effectiveSystemPrompt();
-  if (sys){ out = "[系统指令 / 角色设定]\n" + sys + "\n\n[用户请求]\n" + out;
-    injections.push({kind:"系统词 / 角色设定", text:sys}); }
+  let sysPrompt = "";
   if (isPlain){
+    // Plain modes now send the mode prompt as a REAL system message at
+    // position 0. Inlining it into the user turn (the old behaviour) meant
+    // history replay had to guess where the wrapper was, which changed the
+    // first user bytes and killed the whole cached prefix.
+    sysPrompt = sys;
+    if (sys) injections.push({kind:"系统词 / 角色设定", text:sys});
     // Plain modes use the provider's REAL server-side capabilities: the
     // `think`/`search` booleans become `thinking` + the web-search tool. The
     // entries below are honest audit notes, not fake text injections.
@@ -2140,6 +2145,10 @@ async function send(){
       // anyway -- this mirrors the official open-source chat-demo exactly.
     }
   } else {
+    // Codex-CLI modes keep the inline wrapper: that path has no separate
+    // system-message channel, so leave its proven behaviour untouched.
+    if (sys){ out = "[系统指令 / 角色设定]\n" + sys + "\n\n[用户请求]\n" + out;
+      injections.push({kind:"系统词 / 角色设定", text:sys}); }
     if (cfg.think){ out = "[推理要求] " + thinkText + "\n\n" + out;
       injections.push({kind:"深度思考指令", text:thinkText}); }
     if (cfg.search){ out = "[联网要求] " + searchText + "\n\n" + out;
@@ -2161,6 +2170,7 @@ async function send(){
   try {
     r = await api("POST","/api/chat",{session, prompt: out,
       mode:workMode, effort:cfg.effort, user_input:wire, injections,
+      system_prompt:sysPrompt,
       think:!!cfg.think, search:!!cfg.search,
       attachments:inline});
   } catch(e){
@@ -2702,9 +2712,11 @@ function renderReview(){
       note.style.cssText="margin:-4px 0 14px;line-height:1.7";
       sum.parentNode.insertBefore(note, sum.nextSibling); }
     note.innerHTML="输入 Token 是每次发给 API 的<b>整段上下文</b>，不只是你打的字："+
-      "固定记忆/摘要 + 逐轮历史 + 你的输入。DeepSeek 对<b>从头完全一致的连续前缀</b>"+
-      "按命中价（约 1/10）计费：本 App 已把记忆与历史摘要冻结成快照、历史逐轮追加，"+
-      "因此除摘要重锚那一轮外，旧前缀每轮都能复用。当前命中率 "+rate+"%。"+
+      "固定系统词/记忆/摘要 + 逐轮历史 + 你的输入。DeepSeek 对<b>从第 0 个 token 起完全一致的前缀</b>"+
+      "按命中价（约 1/10）计费：本 App 按官方 chat-demo 的做法把系统词固定为第一条消息、"+
+      "历史逐轮原样追加（含联网搜索的引用状态），同一天的日期标记只写一次；"+
+      "记忆与历史摘要冻结成快照，只在超出预算时重锚。因此除重锚那一轮外，旧前缀每轮都能复用。"+
+      "当前命中率 "+rate+"%。"+
       "<b>注意</b>：纯对话文本很短、常低于缓存的最小门槛（约 128～1024 tok），"+
       "或两次发送间隔太久缓存已过期，命中都会是 0——这属正常，不代表有隐藏内容被发送。";
     list.textContent="";
@@ -3732,7 +3744,7 @@ async function renderGuide(){
   <li><b>全能</b>（出厂默认）：高强度推理（high）+ 深度思考 + 联网 + 系统词 —— 极致能力，Token 最高。注意：本机国内网络无法直连外网，Codex 内置的外网抓取工具不可用；需要联网请改用纯对话 + 联网搜索。</li>
   <li><b>轻量</b>（出厂默认）：低推理（low）+ 系统词 —— 日常平衡。</li>
   <li><b>纯对话</b>（出厂默认）：极简推理（minimal→服务端 low），默认零注入、极致省 Token。顶部的<b>深度思考 / 联网搜索</b>开关是<b>真实 API 能力</b>：深度思考启用 DeepSeek 的 <code>thinking</code>（先推理再答，可展开思考过程），强度按模式映射（minimal/low→low，medium/high→high，max→max）；联网搜索启用 <code>deepseek_web_search</code> 服务端联网，搜索在 DeepSeek 服务器执行、<b>国内网络可用</b>，回答附来源引用。当前日期/星期/地点/语言按 DeepSeek 官方做法通过 <code>latest_reminder</code> 元信息传给模型（随历史回传、不污染缓存），因此模型能正确知道"今天"，不再凭旧记忆作答；是否真的联网由模型按问题自行判断（这是官方 API 的设计，无法强制指定）。需官方 deepseek-flash 模型。你也可给它单独勾选系统词，但会失去"零行李"优势。</li>
-  <li class="hint" style="list-style:none;margin-left:-18px"><b>缓存稳定性</b>：会话首次开启联网搜索后，搜索工具定义会<b>在本会话内固定保留</b>，之后关闭开关只禁用实际联网（<code>tool_choice:none</code>），不再改动提示词前缀——反复切换模式/开关不会让缓存命中归零。历史轮次的思考过程会按预算回传给 API，以满足带工具请求的多轮要求。</li>
+  <li class="hint" style="list-style:none;margin-left:-18px"><b>缓存稳定性</b>：会话首次开启联网搜索后，搜索工具定义会<b>在本会话内固定保留</b>，之后关闭开关只禁用实际联网（<code>tool_choice:none</code>），不再改动提示词前缀。系统词作为第一条独立 system 消息发送、历史按实际发出的内容原样回传，联网轮次的引用/工具状态也原样带回；按官方文档，历史思考过程不进入后续上下文，因此不再回传（既省 Token，也避免前缀漂移）。同一天的日期标记只写一次（对齐官方 chat-demo）。</li>
   <li><b>手机控制</b>（出厂默认）：不走 Codex，也<b>不能自由操控手机</b>；用一次轻量直连调用，从你自制的技能模块里挑一个流程、填好参数，再按白名单确定性执行（详见下节）。</li>
   <li><b>自定义</b>（出厂默认）：逐项选择推理强度、深度思考、联网、系统词注入 —— 按需组合。你还可以把它改名成任意用途（如"写周报""审合同"），并绑定专属系统词，相当于一个自定义角色模式。</li>
 </ul>
@@ -3741,7 +3753,7 @@ async function renderGuide(){
 <ul>
   <li>输入框上方「工作模式」同行显示累计 Token 与缓存命中率（点它进上下文审查）；最新一轮下方有用量卡片，列出输入/缓存命中/未命中/输出，旧轮次的卡片自动收起以节省对话空间（完整数据仍可在上下文审查逐轮查看）。</li>
   <li>「会话历史审查」与会话管理已整合：在会话管理每行点「审查历史」，或点用量气泡进入，顶部下拉可切换要审查的会话。逐轮展示：用户输入原文、注入了哪些指令、传入的 Prompt、模型输出、推理、命令、文件变更与原始 usage；可展开、复制全部。这些记录<b>就是会话的对话历史本身</b>（同一份 <code>.cxweb/</code> 文件，密钥自动屏蔽），因此「删除本轮」会真正删掉那一轮对话、「清空本会话历史」会清空该会话全部对话（操作前自动备份，但不可撤销）。</li>
-  <li><b>缓存命中如何生效</b>：DeepSeek/兼容端点只对"从第 0 个 token 起完全相同的前缀"按命中价（约 1/10）计费。纯对话模式把长期记忆与历史摘要冻结为快照、历史逐轮追加，仅本轮输入在末尾变化，因此旧前缀可稳定复用；摘要会在历史超出预算时偶尔重锚（那一轮可能不命中）。若命中率长期为 0，通常是文本太短未达缓存门槛、两次发送间隔过久缓存过期，或端点未返回缓存字段——均属正常，不会额外扣费。</li>
+  <li><b>缓存命中如何生效</b>：DeepSeek/兼容端点只对"从第 0 个 token 起完全相同的前缀"按命中价（约 1/10）计费。纯对话模式把系统词固定为第一条消息、记忆与历史摘要冻结为快照，历史按实际发出的文本逐轮追加（含联网引用状态），仅本轮输入在末尾变化；摘要会在历史超出预算时偶尔重锚（那一轮可能不命中）。切换模式/思考/搜索开关不会改写工具定义或历史前缀。若命中率长期为 0，通常是文本太短未达缓存门槛、两次发送间隔过久缓存过期，或端点未返回缓存字段——均属正常，不会额外扣费。</li>
   <li><b>关于记录</b>：审查记录与会话历史是同一份数据，每轮对话都会自动保存，无需也无法单独关闭（旧版「记录开关」关闭后对话不落盘、重开即丢失，已移除）。若只想精简上下文而不删历史，可用「上下文压缩」；删除/清空的备份在 <code>backups/</code> 目录。</li>
   <li><b>消息操作（图标按钮，参照 DeepSeek / WorkBuddy）</b>：<b>AI 回复</b>下方有四个图标——<b>复制</b>、<b>重新生成</b>（用原来的问题重新请求一次，旧轮次删除并自动备份，新回答出现在末尾）、<b>分享</b>（调起系统分享把文本发给微信/备忘录；浏览器环境自动降级为复制）、<b>收藏</b>（星标高亮）；<b>用户消息</b>下方只有<b>复制</b>与<b>修改</b>——点修改后气泡变成可编辑框（Enter 发送、Shift+Enter 换行、Esc 取消），点「发送」会从这一轮起（含它的回答及之后所有对话）整体删除并自动备份，再用改后的内容重新请求，更早的对话保留，与 DeepSeek 的编辑语义一致。审查与单轮删除归入「会话历史审查」页，保持对话区简洁。收藏写入全局配置 <code>config.json</code>，在「会话管理」页顶部的「我的收藏」可点「定位」跳回原消息；该配置带 <code>base_rev</code> 乐观锁：多端同时修改时，后写的一方会收到 409 并自动在最新状态上重试，不会互相覆盖。</li>
   <li><b>多端同步</b>：对话页在前台且空闲时，每 4 秒只拉取会话元信息（模式/标题/开关）和一个极小的历史签名；签名变化才重新读取历史并刷新气泡，<b>只拉取不回写</b>。运行中执行中（busy）自动跳过，由 SSE 流式通道独占消息展示，避免重复渲染与写入回环。</li>

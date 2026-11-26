@@ -102,8 +102,13 @@ COMPACT_SNAP_FILE = "compact_snap.json"  # frozen summary anchor, inside .cxweb/
 # Once a session enables 联网搜索 we keep `tools` declared for good and use
 # tool_choice:"none" to switch actual browsing off, so the prefix stays stable.
 TOOLS_STICKY_KEY = "tools_on"
-REASONING_REPLAY_BUDGET = 8000   # max chars of one turn's CoT replayed
-REASONING_TOTAL_BUDGET = 12000  # shared CoT replay cap per request (newest first)
+# DeepSeek's official web-tools guide states prior turns' thinking does NOT
+# enter later context ("之前轮次的思考不会进入后续轮次的上下文，只保留回答正文")
+# and reasoning_content is NOT required when `tools` is declared. Replaying it
+# used to shrink/shift with a shared budget each turn, which rewrote the cached
+# prefix mid-history. We now keep the text for the review page only and NEVER
+# send it back to the API.
+REASONING_REPLAY_BUDGET = 8000   # review-page display cap, NOT sent to the API
 # When the raw history tail overflows the budget we re-anchor the summary. Fold
 # down to a fraction of the budget, not just barely under it: the leftover
 # headroom lets several following turns append without re-anchoring again, so
@@ -814,7 +819,10 @@ def list_context(sid, limit=200):
                 out.append(json.load(f))
         except (OSError, ValueError):
             continue
-    out.sort(key=lambda r: r.get("ts", 0))
+    # Tie-break by id: two turns in the same second must still replay in one
+    # deterministic order, otherwise history bytes can jump between requests
+    # and silently invalidate the cached prefix.
+    out.sort(key=lambda r: (r.get("ts", 0), str(r.get("id") or "")))
     return out
 
 
@@ -1196,7 +1204,10 @@ def usage_cached(usage):
         return 0
     def num(v):
         return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
-    for k in ("prompt_cache_hit_tokens", "cached_tokens", "cached_input_tokens"):
+    # `cache_read_input_tokens` is the top-level spelling returned by the
+    # official 联网工具 usage object; missing it made every search turn show 0.
+    for k in ("prompt_cache_hit_tokens", "cache_read_input_tokens",
+              "cached_tokens", "cached_input_tokens"):
         v = num(usage.get(k))
         if v:
             return v
@@ -1208,6 +1219,30 @@ def usage_cached(usage):
                 if v:
                     return v
     return 0
+
+
+def normalise_usage(usage):
+    """Return (input_total, cached, output) for every DeepSeek usage shape.
+
+    Chat Completions reports `prompt_tokens` + `prompt_cache_hit_tokens`;
+    the web-tools guide reports `input_tokens` (uncached) + `cache_read_input_tokens`
+    instead. Reading only prompt_tokens -- as the old code did -- made every
+    联网搜索 turn display 0 input / 0% hit even when the cache actually hit.
+    """
+    if not isinstance(usage, dict):
+        return 0, 0, 0
+
+    def num(v):
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+
+    cached = usage_cached(usage)
+    inp = num(usage.get("prompt_tokens"))
+    if not inp:
+        # Web-tools shape: input_tokens excludes cache hits, add them back so
+        # hit_rate = cached / total input is comparable with plain chat.
+        inp = num(usage.get("input_tokens")) + cached
+    out = num(usage.get("completion_tokens") or usage.get("output_tokens"))
+    return inp, cached, out
 
 
 def parse_usage(events):
@@ -1273,17 +1308,27 @@ def save_context(job):
             "effort": ctx.get("effort", "medium"),
             "user_input": ctx.get("user_input", ""),
             "effective_prompt": job.get("prompt", ""),
+            # EXACT bytes sent as the user message. `user_input` is the raw
+            # text shown in the bubble and must NOT be replayed when the mode
+            # carried a system prompt: doing so changed the very first user
+            # turn and broke the whole cached prefix. Older records fall back
+            # to effective_prompt via build_cacheable_context().
+            "prompt_sent": ctx.get("prompt_sent", job.get("prompt", "")),
+            "system_prompt": ctx.get("system_prompt", ""),
+            # Verbatim assistant fields from the streamed response. DeepSeek
+            # persists cache units at the OUTPUT end too, and web-tool turns
+            # must replay `server_tool_calls` (kind/signature) to keep read
+            # pages in context. Reasoning is deliberately NOT included.
+            "assistant_msg": ctx.get("assistant_msg") or {},
             "attachments": ctx.get("attachments", []),
             "injections": ctx.get("injections", []),
             # `stream` is only for live UI; the final `message` is authoritative
             # and keeping every partial would bloat review records.
             "events": [{"event": n, "data": v} for n, v in job["events"]
                        if n != "stream"],
-            # DeepSeek requires the previous turns' reasoning_content to be
-            # replayed verbatim whenever a request carries `tools`. Keep a
-            # bounded copy alongside the (already folded) reasoning event so
-            # build_cacheable_context can attach it to historical assistant
-            # messages without re-deriving text from UI-oriented events.
+            # Display-only thinking text for the review page. Official docs
+            # confirm it is NOT needed in later requests, so it is never
+            # replayed to the API (see build_cacheable_context).
             "reasoning": _turn_reasoning(job["events"])[:REASONING_REPLAY_BUDGET],
             "usage": parse_usage(job["events"]),
             "result": job.get("result") or {},
@@ -1484,6 +1529,9 @@ class Runner:
                 # actually received, the active work mode and injected rules.
                 "ctx": {
                     "user_input": opts.get("user_input", prompt),
+                    # Sent as a real system message at position 0, NOT folded
+                    # into the user turn. Stable bytes => cacheable prefix.
+                    "system_prompt": str(opts.get("system_prompt") or "")[:MEMORY_BUDGET],
                     "mode": opts.get("mode", "full"),
                     "effort": opts.get("effort", "medium"),
                     "injections": opts.get("injections", []),
@@ -1584,8 +1632,8 @@ class Runner:
 
     def _run_direct(self, job):
         """Pure-chat mode: call the OpenAI-compatible chat/completions endpoint
-        directly with urllib (stdlib only). No system prompt, no tools, no
-        Codex luggage -- exactly the user's text goes out. Streamed via SSE."""
+        directly with urllib (stdlib only). No Codex luggage; message layout
+        follows DeepSeek's official cacheable pattern. Streamed via SSE."""
         import urllib.request
         import ssl
         base = configured_base_url().rstrip("/")
@@ -1595,71 +1643,57 @@ class Runner:
         # it). Only emit on the official host -- other OpenAI-compatible
         # providers reject the unknown message role with 400.
         use_reminder = is_deepseek_endpoint(base)
-        # Snapshot the client-supplied instructions BEFORE the memory/compact
-        # enrichment below appends its own entries to ctx["injections"].
+        # Snapshot the client-supplied instructions BEFORE the enrichment below
+        # appends its own entries to ctx["injections"].
         explicit = [i for i in (job.get("ctx", {}).get("injections") or [])
                     if isinstance(i, dict)]
         if not base or not key:
             self.emit(job, "error", {"message": "纯对话需要先在「设置 → 模型与 API」配置 Key 与 Base URL"})
             self._finish(job, None, "")
             return
-        # "Full capabilities": memory + compressed history give pure-chat a
-        # persistent brain without any Codex system prompt or tool schema.
-        # Still no tools, no Codex luggage -- just the user's own memory and
-        # this session's own conversation, both stored locally.
+        ctx = job.setdefault("ctx", {})
+        # Persist the EXACT user text being sent so later turns replay the same
+        # bytes. The bubble's `user_input` may omit the mode's system wrapper.
+        ctx["prompt_sent"] = job["prompt"]
         sid = job["sid"]
         caps = read_caps()
-        # Decide tools stickiness BEFORE building history: reasoning_content
-        # must be replayed on historical assistant turns whenever `tools` is
-        # present. tools_on is monotonic within a session (once search is used
-        # it never flips back), so conditioning history bytes on it stays
-        # prefix-stable; the only change is the one turn where search is first
-        # enabled, which is also when `tools` itself first appears.
-        want_search = bool(job.get("ctx", {}).get("search"))
+        # tools stickiness is still needed: declaring the web-search schema
+        # changes the request prefix, so once a session enables it we keep it.
+        want_search = bool(ctx.get("search"))
         meta = read_session_meta(sid)
         tools_on = bool(meta.get(TOOLS_STICKY_KEY)) or want_search
-        # Cache-friendly assembly: stable system prefix + append-only history.
-        # This is the fix for 0% cache hit on multi-turn pure chat: the old code
-        # recomputed a summary and slid a history window every turn, so the
-        # prompt's opening bytes changed each time and DeepSeek could never
-        # reuse the cached prefix. See build_cacheable_context().
-        if caps.get("memory") or caps.get("compact"):
-            messages, parts, ctxinfo = build_cacheable_context(sid, caps,
-                                                               include_reasoning=tools_on,
-                                                               with_reminder=use_reminder)
-            # Record injections so the review view stays honest.
-            ctx = job.setdefault("ctx", {})
-            inj = ctx.setdefault("injections", [])
-            for p in parts:
-                inj.append({"kind": p, "text": p})
-        else:
-            messages, ctxinfo = [], {"covered": 0, "raw_turns": 0,
-                                     "total_turns": 0, "cacheable": False}
-        # Capability audit notes (深度思考 / 联网搜索) are recorded in ctx for
-        # the review page but are NOT text the model should obey -- thinking
-        # and web search are now real API parameters, built below. Only other
-        # instruction kinds become a system message, so an untouched pure-chat
-        # still sends exactly the user's own text with zero extra baggage.
-        # NOTE: keep legacy kinds (智能搜索 / 联网检索指令) so old review records
-        # still parse; 联网搜索 is the current label pushed by the client.
+        # Capability audit notes are recorded for the review page, NOT sent as
+        # text: thinking / search are real API parameters. Keep the legacy
+        # kinds so old review records still parse. The mode's system prompt
+        # now travels as a real system message at position 0.
         AUDIT_KINDS = ("深度思考", "智能搜索", "联网搜索", "深度思考指令",
-                       "联网检索指令", "系统词 / 角色设定")  # already inlined into job["prompt"] by the client
-        real_instr = [i for i in explicit
-                      if scrub(str(i.get("kind") or "")) not in AUDIT_KINDS]
-        if real_instr:
-            lines = []
-            for item in real_instr:
-                kind = scrub(str(item.get("kind") or "指令"))
-                text = scrub(str(item.get("text") or "")).strip()
-                if text:
-                    lines.append("[%s] %s" % (kind, text))
-            if lines:
-                messages.append({"role": "system", "content": "\n\n".join(lines)})
+                       "联网检索指令", "系统词 / 角色设定")
+        instr_lines = []
+        for item in explicit:
+            if scrub(str(item.get("kind") or "")) in AUDIT_KINDS:
+                continue
+            kind = scrub(str(item.get("kind") or "指令"))
+            text = scrub(str(item.get("text") or "")).strip()
+            if text:
+                instr_lines.append("[%s] %s" % (kind, text))
+        # Cache-friendly assembly: frozen system prefix + append-only history.
+        # ALWAYS build history: caps only control memory/summary blocks, never
+        # whether prior turns are replayed. Skipping history when both caps
+        # were off used to make every turn a brand-new conversation.
+        messages, parts, ctxinfo = build_cacheable_context(
+            sid, caps, with_reminder=use_reminder,
+            system_prompt=str(ctx.get("system_prompt") or ""),
+            instructions=instr_lines)
+        # Record injections so the review view stays honest.
+        inj = ctx.setdefault("injections", [])
+        for p in parts:
+            inj.append({"kind": p, "text": p})
         # Current turn: real date marker immediately before the user message,
-        # exactly like the official client. Use this turn's ts.
+        # exactly like the official client. Skip it when unchanged from the
+        # last historical snapshot (official chat-demo dedupe rule).
         if use_reminder:
-            rm = reminder_msg(job.get("ctx", {}).get("ts"))
-            if rm:
+            rm = reminder_msg(ctx.get("ts"))
+            if rm and rm["content"] != ctxinfo.get("last_reminder"):
                 messages.append(rm)
         messages.append({"role": "user", "content": job["prompt"]})
         # Pre-flight total input cap: the sum of system/enrichment/history/user
@@ -1726,8 +1760,10 @@ class Runner:
                      "Authorization": "Bearer " + key}, method="POST")
         t0 = time.time()
         full = []
-        reasoning = []       # delta.reasoning_content when thinking is on
-        citations = []       # web search source citations
+        reasoning = []       # display-only, never replayed to the API
+        citations = []       # compact list for the "搜索来源" bubble
+        annotations = []     # full citation objects, replayed verbatim
+        server_tool_calls = []  # web-tool state (kind/signature), replayed verbatim
         usage = {}
         raw_lines = []
         if job["stop"].is_set():
@@ -1768,11 +1804,24 @@ class Runner:
                     if rpiece:
                         reasoning.append(rpiece)
                         self.emit(job, "reasoning", {"text": "".join(reasoning)})
-                    # Web search citations arrive as annotations/citations.
-                    for ann in (delta.get("annotations") or delta.get("citations") or []):
-                        if isinstance(ann, dict):
-                            citations.append({"title": ann.get("title") or "",
-                                              "url": ann.get("url") or ""})
+                    # Web search citations arrive as annotations/citations;
+                    # the complete set is in the final `finish_reason` chunk.
+                    anns = delta.get("annotations") or delta.get("citations") or []
+                    if anns:
+                        annotations = anns      # full objects for exact replay
+                        for ann in anns:
+                            if not isinstance(ann, dict):
+                                continue
+                            cite = ann.get("url_citation")
+                            cite = cite if isinstance(cite, dict) else ann
+                            citations.append({"title": cite.get("title") or "",
+                                              "url": cite.get("url") or ""})
+                    # Official guide: replay prior assistant replies with
+                    # server_tool_calls intact (kind/signature) so previously
+                    # read pages stay in context AND the output-end cache
+                    # prefix matches byte-for-byte.
+                    if delta.get("server_tool_calls"):
+                        server_tool_calls = delta["server_tool_calls"]
                     piece = delta.get("content")
                     if piece:
                         full.append(piece)
@@ -1800,6 +1849,14 @@ class Runner:
             self._finish(job, 1, msg)
             return
         text = "".join(full)
+        # Store the exact assistant message for later turns. No strip(): the
+        # model's own trailing newline is part of the persisted cache unit.
+        amsg = {"content": text}
+        if annotations:
+            amsg["annotations"] = annotations
+        if server_tool_calls:
+            amsg["server_tool_calls"] = server_tool_calls
+        ctx["assistant_msg"] = amsg
         if job["stop"].is_set():
             # User stopped the stream. Keep any partial reply so this turn is
             # recorded and the session does not look "lost"; finish cleanly so
@@ -1807,10 +1864,10 @@ class Runner:
             if text:
                 self.emit(job, "message", {"text": text + "\n\n（已停止）"})
                 if usage:
+                    inp, cached, out = normalise_usage(usage)
                     self.emit(job, "usage", {
-                        "input_tokens": int(usage.get("prompt_tokens") or 0),
-                        "output_tokens": int(usage.get("completion_tokens") or 0),
-                        "cached_input_tokens": usage_cached(usage)})
+                        "input_tokens": inp, "output_tokens": out,
+                        "cached_input_tokens": cached})
             self.diag = {"status": "已停止（纯对话）", "phase": "finished",
                          "id": job["id"], "time": int(time.time()),
                          "stopped": True}
@@ -1836,9 +1893,11 @@ class Runner:
                 self.emit(job, "tool", {"tool": "联网搜索来源",
                                         "status": "\n".join(src_lines[:12])})
         # Emit a normalised usage event so token stats/review keep working.
-        u = {"input_tokens": int(usage.get("prompt_tokens") or 0),
-             "output_tokens": int(usage.get("completion_tokens") or 0),
-             "cached_input_tokens": usage_cached(usage)}
+        # `normalise_usage` also handles the web-tools shape where input_tokens
+        # excludes cache hits -- otherwise 联网搜索 turns always showed 0%.
+        inp, cached, out = normalise_usage(usage)
+        u = {"input_tokens": inp, "output_tokens": out,
+             "cached_input_tokens": cached}
         self.emit(job, "usage", u)
         caps_used = []
         if want_think:
@@ -1902,11 +1961,11 @@ class Runner:
             self.emit(job, "error", {"message": "技能参数有误：" + scrub(str(ex))})
             self._finish(job, 1, "")
             return
+        _in, _cached, _out = normalise_usage(usage)
         if not resolved:
             self.emit(job, "message", {"text": reply or "（没有匹配的技能模块）"})
-            self.emit(job, "usage", {"input_tokens": int(usage.get("prompt_tokens") or 0),
-                                     "output_tokens": int(usage.get("completion_tokens") or 0),
-                                     "cached_input_tokens": usage_cached(usage)})
+            self.emit(job, "usage", {"input_tokens": _in, "output_tokens": _out,
+                                     "cached_input_tokens": _cached})
             self.diag = {"status": "已完成（未执行设备操作）", "phase": "finished",
                          "id": job["id"], "time": int(time.time()), "exit": 0}
             self._finish(job, 0, "")
@@ -1954,9 +2013,8 @@ class Runner:
         summary += "已执行 %d/%d 步%s。" % (done, len(resolved),
                                           ("，第 %d 步失败后停止" % (done + 1)) if failed else "")
         self.emit(job, "message", {"text": summary})
-        self.emit(job, "usage", {"input_tokens": int(usage.get("prompt_tokens") or 0),
-                                 "output_tokens": int(usage.get("completion_tokens") or 0),
-                                 "cached_input_tokens": usage_cached(usage)})
+        self.emit(job, "usage", {"input_tokens": _in, "output_tokens": _out,
+                                 "cached_input_tokens": _cached})
         self.diag = {"status": "已完成（技能模块 %d 步）" % len(resolved), "phase": "finished",
                      "id": job["id"], "time": int(time.time()),
                      "elapsed": int(time.time() - t0), "exit": 0 if not failed else 1}
@@ -2772,31 +2830,48 @@ def reminder_msg(ts=None):
     return {"role": "latest_reminder", "content": text} if text else None
 
 
-def build_cacheable_context(sid, caps, include_reasoning=False, with_reminder=False):
+def build_cacheable_context(sid, caps, with_reminder=False, system_prompt="",
+                            instructions=None):
     """Assemble pure-chat messages with a STABLE PREFIX so provider-side
     context caching actually hits (DeepSeek charges ~1/10 for cache hits).
 
     Layout, front to back:
-      [system: frozen memory + frozen summary]  <- byte-stable across turns
-      [turn 1.user, turn 1.assistant, ... up to N] <- grows by append only
-      [this turn's user input]                   <- the only always-new part
+      [system: mode prompt + instructions + frozen memory/summary] <- stable
+      [reminder + user + assistant ... up to N] <- grows by append only
+      [this turn's reminder + user]             <- added by the caller
 
-    The compressed summary is a SNAPSHOT: it only re-anchors when the raw
-    history tail would exceed the char budget. Between re-anchors its bytes
-    never change, so every turn's prefix is identical to the last one plus
-    appended messages -> the whole old prefix is a cache hit.
-
-    include_reasoning: attach each turn's stored reasoning_content to its
-    assistant message (required by DeepSeek when `tools` is declared). Off by
-    default so a never-searched session sends nothing extra.
-    with_reminder: prepend a DeepSeek `latest_reminder` message before each
-    historical user turn (using that turn's ts) so the model sees the real
-    date and the cached prefix stays byte-stable. Only pass True on official
-    DeepSeek endpoints (other providers reject the unknown role).
+    Byte-stability rules from DeepSeek's official KV-cache guide: prefixes are
+    complete units persisted at request boundaries and only an exact match
+    from token 0 can hit, so nothing in front may be recomputed or reworded.
+      * Replay the EXACT user text previously sent (`prompt_sent`), not the
+        display-only `user_input`: a mode-carried system prompt used to be
+        inlined into the user turn, and replaying the raw bubble text changed
+        turn 1 and destroyed every hit.
+      * Replay the response's `server_tool_calls` / `annotations` verbatim:
+        DeepSeek also persists a cache unit at the OUTPUT end, and web-tool
+        signatures keep previously read pages in context.
+      * Do NOT replay `reasoning_content`: official docs say past thinking
+        does not enter later context, and the old moving-budget replay rewrote
+        the middle of the prefix on every turn.
+    The summary is a SNAPSHOT re-anchored only when the raw tail overflows.
+    with_reminder must only be True on official DeepSeek endpoints.
     Returns (messages, injection_parts, info)."""
     turns = list_context(sid, limit=400)          # chronological, oldest first
     parts = []
     blocks = []
+
+    # 0) Mode-carried system prompt: the FIRST message, frozen across turns.
+    sp = str(system_prompt or "").strip()
+    if sp:
+        blocks.append(sp)
+        parts.append("系统词 / 角色设定")
+    # 0b) Rare non-audit instructions also go in front of the history tail,
+    #     never between old turns (that would split the append-only prefix).
+    if instructions:
+        lines = [str(x).strip() for x in instructions if str(x).strip()]
+        if lines:
+            blocks.append("\n\n".join(lines))
+            parts.append("模式补充指令")
 
     # 1) Frozen memory block (only changes when the user edits MEMORY.md).
     if caps.get("memory"):
@@ -2808,17 +2883,28 @@ def build_cacheable_context(sid, caps, include_reasoning=False, with_reminder=Fa
     # 2) History: replay raw turns from a fixed anchor so the prefix only grows.
     covered = 0
     summary = ""
+
+    def replay_chars(t):
+        """Budget the SAME bytes we replay, including web-tool state."""
+        a = t.get("assistant_msg") if isinstance(t.get("assistant_msg"), dict) else {}
+        ans = str(a.get("content") or "")
+        if not ans:
+            for e in (t.get("events") or []):
+                if e.get("event") == "message" and isinstance(e.get("data"), dict):
+                    ans = str(e["data"].get("text") or "")
+                    if ans:
+                        break
+        extra = sum(len(json.dumps(a.get(k), ensure_ascii=False))
+                    for k in ("annotations", "server_tool_calls") if a.get(k))
+        return (len(str(t.get("prompt_sent") or t.get("effective_prompt")
+                        or t.get("user_input") or "")) + len(ans) + extra)
+
     if caps.get("compact"):
         snap = read_compact_snap(sid)
         covered = min(snap.get("covered", 0), len(turns))
         summary = snap.get("text", "")
         # Re-anchor only when the un-summarised tail is too big to send whole.
-        tail = turns[covered:]
-        tail_chars = sum(len(str(t.get("user_input") or "")) +
-                         sum(len(str((e.get("data") or {}).get("text") or ""))
-                             for e in (t.get("events") or [])
-                             if e.get("event") == "message")
-                         for t in tail)
+        tail_chars = sum(replay_chars(t) for t in turns[covered:])
         if tail_chars > MAX_DIRECT_INPUT_CHARS:
             # Fold oldest turns into summary until the raw tail fits with
             # headroom. Re-anchoring is expensive (it changes the frozen prefix
@@ -2829,10 +2915,7 @@ def build_cacheable_context(sid, caps, include_reasoning=False, with_reminder=Fa
                 summary = (summary + "\n" if summary else "") + \
                           summarize_turns([t])
                 covered += 1
-                tail_chars -= (len(str(t.get("user_input") or "")) +
-                               sum(len(str((e.get("data") or {}).get("text") or ""))
-                                   for e in (t.get("events") or [])
-                                   if e.get("event") == "message"))
+                tail_chars -= replay_chars(t)
             if len(summary) > SUMMARY_BUDGET:
                 summary = summary[-SUMMARY_BUDGET:]
             write_compact_snap(sid, covered, summary)
@@ -2843,50 +2926,50 @@ def build_cacheable_context(sid, caps, include_reasoning=False, with_reminder=Fa
     # 3) Raw turns after the anchor, in chronological order. This tail grows by
     #    append only: turn N's list == turn N-1's list + the newest pair.
     raw_turns = turns[covered:]
-    # Allocate reasoning replay from newest to oldest under a shared budget:
-    # DeepSeek wants every prior turn's CoT when tools are declared, but a
-    # long thinking history must not blow the hard input cap. Newest turns
-    # matter most; older ones fall back to content-only (valid when tools are
-    # off, and harmless when on -- the model simply loses some stale CoT).
-    reasoning_quota = {id(t): 0 for t in raw_turns}
-    if include_reasoning:
-        left = REASONING_TOTAL_BUDGET
-        for t in reversed(raw_turns):
-            take = min(len(str(t.get("reasoning") or "")),
-                       REASONING_REPLAY_BUDGET, left)
-            if take > 0:
-                reasoning_quota[id(t)] = take
-                left -= take
-            if left <= 0:
-                break
     raw_msgs = []
+    tool_replay = 0
+    # Official chat-demo only emits a `latest_reminder` snapshot when its
+    # content changes (same-day turns share one). Fewer tokens, same stable
+    # append-only prefix, and it matches how DeepSeek's own client behaves.
+    previous_reminder = None
     for t in raw_turns:
-        u = str(t.get("user_input") or "").strip()
+        # CRITICAL: replay the bytes that were actually sent. `user_input` is
+        # the raw bubble text and does not contain the mode's system prompt
+        # that older clients inlined into the request; replaying it changed
+        # the first user message and nullified the whole cached prefix.
+        u = str(t.get("prompt_sent") or t.get("effective_prompt")
+                or t.get("user_input") or "").strip()
         if u:
             # Replay each historical turn's own date marker before its user
-            # message (official DeepSeek pattern). Using the turn's stored ts
-            # keeps these bytes frozen -- appending new turns never rewrites
-            # them, so the cached prefix stays valid.
+            # message (official DeepSeek pattern), deduped like the official
+            # chat-demo. Using the turn's stored ts keeps these bytes frozen.
             if with_reminder:
                 rm = reminder_msg(t.get("ts"))
-                if rm:
+                if rm and rm["content"] != previous_reminder:
                     raw_msgs.append(rm)
+                    previous_reminder = rm["content"]
             raw_msgs.append({"role": "user", "content": u[:12000]})
-        ans = ""
-        for e in (t.get("events") or []):
-            if e.get("event") == "message" and isinstance(e.get("data"), dict):
-                ans = str(e["data"].get("text") or "").strip()
-                if ans:
-                    break
+        aorig = t.get("assistant_msg") if isinstance(t.get("assistant_msg"), dict) else {}
+        ans = str(aorig.get("content") or "")
+        if not ans:  # legacy records: derive from UI events (best effort)
+            for e in (t.get("events") or []):
+                if e.get("event") == "message" and isinstance(e.get("data"), dict):
+                    ans = str(e["data"].get("text") or "").strip()
+                    if ans:
+                        break
         if ans:
             amsg = {"role": "assistant", "content": ans[:12000]}
-            # DeepSeek requires prior turns' reasoning_content to be replayed
-            # verbatim whenever `tools` is present (else HTTP 400). Attach it
-            # only when `tools` is actually declared (session-sticky), so the
-            # bytes stay stable across 联网搜索 toggles within the session.
-            take = reasoning_quota.get(id(t), 0)
-            if take:
-                amsg["reasoning_content"] = str(t.get("reasoning") or "")[:take]
+            # Official web-tools guide: replay prior assistant replies as-is,
+            # especially server_tool_calls (kind/signature) and annotations.
+            # DeepSeek also persists a cache unit at the OUTPUT end, so exact
+            # bytes here recover an additional cache hit. NEVER attach
+            # reasoning_content -- it is not required and its moving budget
+            # used to rewrite the prefix on every turn.
+            for k in ("annotations", "server_tool_calls"):
+                v = aorig.get(k)
+                if v:
+                    amsg[k] = v
+                    tool_replay += 1
             raw_msgs.append(amsg)
 
     messages = []
@@ -2894,7 +2977,9 @@ def build_cacheable_context(sid, caps, include_reasoning=False, with_reminder=Fa
         messages.append({"role": "system", "content": "\n\n".join(blocks)})
     messages.extend(raw_msgs)
     info = {"covered": covered, "raw_turns": len(turns) - covered,
-            "total_turns": len(turns), "cacheable": True}
+            "total_turns": len(turns), "cacheable": True,
+            "exact_user_replay": True, "tool_replay": tool_replay,
+            "last_reminder": previous_reminder}
     return messages, parts, info
 
 
@@ -3726,6 +3811,10 @@ class Handler(BaseHTTPRequestHandler):
                 effort = WORK_MODES[mode]["effort"]
             opts = {
                 "user_input": str(body.get("user_input") or prompt)[:200000],
+                # Mode-carried system prompt travels separately so it can sit
+                # at the very front of the message list and stay byte-stable.
+                # Old clients that still inline it in `prompt` need no change.
+                "system_prompt": str(body.get("system_prompt") or "")[:MEMORY_BUDGET],
                 "mode": mode, "effort": effort,
                 "injections": body.get("injections") if isinstance(body.get("injections"), list) else [],
                 "attachments": attachments,
