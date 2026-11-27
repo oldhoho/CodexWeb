@@ -132,11 +132,15 @@ SEC_NOTE_OPEN, SEC_NOTE_CLOSE = "⟦NOTE⟧", "⟦/NOTE⟧"
 # Fixed contract appended to the system prompt: tells the model WHEN to emit
 # the markers. It never changes between compiles -> stays in the stable prefix.
 SEC_RECORD_CONTRACT = (
-    "\n\n【记录约定】你具备跨会话长期记忆。完成一个明确任务或得出实质结论后，"
-    "在正文末尾另起一行附一条工作记录（用户不可见，勿在正文提及），格式："
+    "\n\n【记录约定】你具备跨会话长期记忆。在正文末尾另起一行附标记（用户不可见，勿在正文提及）。"
+    "完成明确任务或得出实质结论后附工作记录："
     "⟦LOG⟧任务: <一句话>\n结论: <结果或待办>\n风格: <观察到的用户风格信号，可留空>⟦/LOG⟧。"
-    "仅当用户明确要求「记住/别忘了」时，另附一条："
-    "⟦NOTE⟧<需要长期记住的原话>⟦/NOTE⟧。没有值得记的内容就不要输出任何标记。"
+    "以下情形另附用户笔记：⟦NOTE⟧<需长期记住的内容>⟦/NOTE⟧："
+    "1) 用户要求记住、记一下、别忘了或以后都这样；"
+    "2) 用户说出稳定的个人事实或偏好（居住地、身份、设备、习惯、称呼、在意或避开的事、回复风格）；"
+    "3) 用户纠正此前的理解且纠正后的信息长期有效。"
+    "只记长期有效信息，今日天气或本次任务细节等一次性内容不记。"
+    "没有值得记的内容就不要输出任何标记。"
 )
 
 # A fixed, byte-stable system note declaring the web-search capability.
