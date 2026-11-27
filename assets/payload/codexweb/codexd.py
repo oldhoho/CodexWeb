@@ -3183,6 +3183,67 @@ def reminder_msg(ts=None):
     return {"role": "latest_reminder", "content": text} if text else None
 
 
+def compact_replay_tools(value):
+    """Shrink web-tool state for HISTORY replay only, byte-stably.
+
+    DeepSeek's official web-tools guide (Chat Completions / multi-turn):
+      - keep each assistant reply's `server_tool_calls` verbatim, with the
+        `kind` / `signature` fields (signature restores read_link pages);
+      - `sources` are display-only; snippet / site_name / site_icon /
+        published_at are explicitly IGNORED on replay ("回传时会被忽略");
+      - `annotations` citations are likewise ignored on replay;
+      - search results never enter later turns' context -- only the answer
+        text does. So shipping full snippets buys nothing and costs a lot.
+    We keep id/type/kind/action/status (needed to match the call) plus each
+    source's url/title (used by the UI to label citations). Everything else
+    is dropped. Pure function, deterministic key order => identical bytes
+    across turns, so the cached prefix unit stays intact.
+    The stored record is NOT modified: the review page and source cards
+    still read the full payload from disk.
+    """
+    if not isinstance(value, list):
+        return value
+    steps = []
+    for step in value:
+        if not isinstance(step, dict):
+            continue
+        out_step = {}
+        for k in ("index", "reasoning_content"):
+            if k in step:
+                out_step[k] = step[k]
+        calls = []
+        for call in (step.get("calls") or []):
+            if not isinstance(call, dict):
+                continue
+            one = {}
+            for k in ("index", "id", "type", "kind", "action", "status",
+                      "signature"):
+                if k in call:
+                    one[k] = call[k]
+            srcs = []
+            for s in (call.get("sources") or []):
+                if not isinstance(s, dict):
+                    continue
+                item = {}
+                for k in ("type", "url", "title"):
+                    if k in s:
+                        item[k] = s[k]
+                srcs.append(item)
+            if srcs:
+                one["sources"] = srcs
+            # `page` is display-only too (url/title/published_at); keep url
+            # and title so citations can still be labelled.
+            page = call.get("page")
+            if isinstance(page, dict):
+                one["page"] = {k: page[k] for k in ("url", "title") if k in page}
+            if "error" in call:
+                one["error"] = call["error"]
+            calls.append(one)
+        out_step["calls"] = calls
+        steps.append(out_step)
+    return steps
+
+
 def build_cacheable_context(sid, caps, with_reminder=False, system_prompt="",
                             instructions=None, web_search_capable=False):
     """Assemble pure-chat messages with a STABLE PREFIX so provider-side
@@ -3255,8 +3316,13 @@ def build_cacheable_context(sid, caps, with_reminder=False, system_prompt="",
                     ans = str(e["data"].get("text") or "")
                     if ans:
                         break
-        extra = sum(len(json.dumps(a.get(k), ensure_ascii=False))
-                    for k in ("annotations", "server_tool_calls") if a.get(k))
+        # Budget the SAME bytes we actually replay (compacted tool state);
+        # over-counting here would re-anchor the snapshot too early and split
+        # the append-only prefix for no reason.
+        extra = 0
+        stc = a.get("server_tool_calls")
+        if stc:
+            extra += len(json.dumps(compact_replay_tools(stc), ensure_ascii=False))
         return (len(str(t.get("prompt_sent") or t.get("effective_prompt")
                         or t.get("user_input") or "")) + len(ans) + extra)
 
@@ -3320,17 +3386,18 @@ def build_cacheable_context(sid, caps, with_reminder=False, system_prompt="",
                         break
         if ans:
             amsg = {"role": "assistant", "content": ans[:12000]}
-            # Official web-tools guide: replay prior assistant replies as-is,
-            # especially server_tool_calls (kind/signature) and annotations.
-            # DeepSeek also persists a cache unit at the OUTPUT end, so exact
-            # bytes here recover an additional cache hit. NEVER attach
-            # reasoning_content -- it is not required and its moving budget
-            # used to rewrite the prefix on every turn.
-            for k in ("annotations", "server_tool_calls"):
-                v = aorig.get(k)
-                if v:
-                    amsg[k] = v
-                    tool_replay += 1
+            # Official web-tools guide (Chat Completions / multi-turn): replay
+            # `server_tool_calls` keeping kind/signature, but snippet/site_name/
+            # site_icon/published_at are IGNORED on replay and `annotations`
+            # citations are ignored too -- shipping them only burns tokens.
+            # compact_replay_tools() is a pure function, so the trimmed bytes
+            # are identical every turn and the cache prefix unit stays intact.
+            # NEVER attach reasoning_content: past thinking does not enter
+            # later context and its moving budget rewrote the prefix.
+            stc = aorig.get("server_tool_calls")
+            if stc:
+                amsg["server_tool_calls"] = compact_replay_tools(stc)
+                tool_replay += 1
             raw_msgs.append(amsg)
 
     messages = []
