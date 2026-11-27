@@ -716,7 +716,7 @@ svg{display:block;flex-shrink:0}
         <span>💰</span><span class="bBal" id="balanceVal">余额 …</span>
         <span class="bSub" id="balanceSub">DeepSeek</span>
       </div>
-      <div class="verRow">v77 · 本机 proot 运行</div>
+      <div class="verRow">v78 · 本机 proot 运行</div>
     </div>
   </aside>
   <div class="drawerMask" id="drawerMask"></div>
@@ -1244,11 +1244,22 @@ async function applySharedConfig(seed){
   const c=cfgState.config||{};
   const sd=c.modeDefs;
   if (sd && typeof sd==="object"){
+    // Upgrade installs persist an older modeDefs (e.g. no `secretary`). Fill
+    // missing keys/fields from defaults AND push them back, otherwise the
+    // shared config stays stale forever and later clients never see the mode.
+    let missing=false;
     for (const k in MODE_DEFAULTS){
-      const s=sd[k]; if(!s) continue;
-      for (const f of MODE_FIELDS) if (s[f]!==undefined) modeDefs[k][f]=s[f];
+      let s=sd[k];
+      if (!s || typeof s!=="object"){
+        s=Object.assign({},modeDefs[k]); sd[k]=s; missing=true;
+      }
+      for (const f of MODE_FIELDS){
+        if (s[f]!==undefined) modeDefs[k][f]=s[f];
+        else { s[f]=modeDefs[k][f]; missing=true; }
+      }
     }
     try{ localStorage.setItem("cx.modeDefs",JSON.stringify(modeDefs)); }catch(e){}
+    if (missing) saveConfig({modeDefs:sd}).catch(()=>{});
   } else if (seed) {
     // First run: migrate local modeDefs into the shared config.
     try{ await saveConfig({modeDefs:modeDefs}); }catch(e){}

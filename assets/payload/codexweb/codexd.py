@@ -3871,6 +3871,12 @@ EXPORT_LOG_LINES = 200
 EXPORT_LOG_BYTES = 262144
 EXPORT_SECRET_KEYS = re.compile(
     r"(?i)^(api[_-]?key|key|secret|pin|cookie|authorization|credential|password|session_secret)$")
+# `scrub()` is tuned for logs and treats every `sk-...` as a key. Skill module
+# IDs are `sk-` + 8 hex, so exporting them through scrub() turned all IDs into
+# "***". Real DeepSeek keys are much longer; keep the narrow export rule.
+EXPORT_SECRET_RE = re.compile(
+    r"(?i)(sk-[A-Za-z0-9_\-]{20,}|bearer\s+[A-Za-z0-9._\-]{16,}"
+    r"|(?<=token[=:\" ])[A-Za-z0-9_\-]{12,}|(?<=\"token\":\")[A-Za-z0-9_\-]{12,})")
 
 
 def _export_clip(value, limit=1500):
@@ -3894,7 +3900,7 @@ def _export_clean(obj, limit=1500, depth=0):
     if isinstance(obj, (list, tuple)):
         return [_export_clean(v, limit, depth + 1) for v in list(obj)[:EXPORT_EVENT_ITEMS]]
     if isinstance(obj, str):
-        return scrub(_export_clip(obj, limit))
+        return EXPORT_SECRET_RE.sub("***", _export_clip(obj, limit))
     return obj
 
 
@@ -4035,7 +4041,14 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
-        log("%s %s" % (self.client_address[0], scrub(fmt % args)))
+        line = fmt % args
+        # Visibility polling hits these four endpoints ~4x/second, which used
+        # to drown the tail of codexweb.log and make diagnostics exports mostly
+        # noise. Real errors still go through log() at the call site.
+        if any(p in line for p in ("/api/device/poll", "/api/history/sig",
+                                   "/api/sessions/meta?", "/api/config")):
+            return
+        log("%s %s" % (self.client_address[0], scrub(line)))
 
     # -- plumbing
     @property

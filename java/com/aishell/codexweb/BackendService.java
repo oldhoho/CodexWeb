@@ -284,6 +284,10 @@ public class BackendService extends Service {
             RuntimePayload.writeExecutable(new File(web, "launch.sh"),
                     RuntimePayload.readText(RuntimePayload.member(this, "codexweb/launch.sh")));
             copyText(RuntimePayload.member(this, "codexweb/codexd.py"), new File(web, "codexd.py"));
+            // The payload VERSION marker lives in files/payload, which is not
+            // bound into proot. Mirror it next to codexd.py so /codexweb can
+            // read the real build number (diagnostics export showed blank).
+            copyText(RuntimePayload.member(this, "VERSION"), new File(web, ".payload-version"));
             copyText(RuntimePayload.member(this, "codexweb/ui/index.html"), new File(ui, "index.html"));
             // Offline tool jars (apktool / jadx): shipped inside the APK because
             // the guest often cannot reach GitHub at runtime. Staged into
