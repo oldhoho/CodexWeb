@@ -117,6 +117,10 @@ echo "[apk] sign"
 ls -la "$DIST"
 # Keep dist lean: after a successful build, drop older CodexWeb-v<N> APKs and
 # older launcher archives. Unversioned CodexWeb.apk/.idsig stay as build output.
-echo "[apk] cleanup old APKs"
-python3 "$ROOT/tools/cleanup-apks.py" "$(dirname "$DIST")"
+if [ "${SKIP_CLEANUP:-0}" = "1" ]; then
+  echo "[apk] cleanup skipped (SKIP_CLEANUP=1); intermediates kept on disk"
+else
+  echo "[apk] cleanup old APKs"
+  python3 "$ROOT/tools/cleanup-apks.py" "$(dirname "$DIST")"
+fi
 echo "BUILD_OK $DIST"

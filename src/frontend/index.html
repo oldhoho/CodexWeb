@@ -4164,11 +4164,32 @@ async function renderGuide(){
 <p class="hint">发送后若没有回复，请看这里；把内容发我即可定位，密钥已自动屏蔽。</p>
 <div class="card" id="diagBox">${diagHtml(g.diag)}</div>
 <button class="btn" id="diagRefresh" style="margin-top:8px">刷新诊断</button>
+<button class="btn primary" id="exportBundle" style="margin-top:8px">一键导出实机数据</button>
+<div class="msgline" id="exportMsg"></div>
+<p class="hint">导出内容：工作模式 / 提示词 / 技能模块 / 秘书记忆 / 全部会话的对话与用量（最近 24 轮含完整事件与搜索来源）/ 最近 200 行日志。API Key、Token、PIN 与附件正文一律屏蔽；一次导出上限约 260KB（系统分享的文本限制），超出会优先保留最新数据。点按钮后走系统分享，直接发给 WorkBuddy 即可让我分析。</p>
 <h2>当前 config.toml</h2>
 <pre>${esc(g.config||defaultConfig())}</pre>`;
   $("diagRefresh").onclick=async()=>{
     try{ const d=await api("GET","/api/diag"); $("diagBox").innerHTML=diagHtml(d); }
     catch(e){ $("diagBox").textContent=e.message; }
+  };
+  $("exportBundle").onclick=async()=>{
+    const btn=$("exportBundle"), msg=$("exportMsg");
+    btn.disabled=true; msg.className="msgline"; msg.textContent="正在整理实机数据…";
+    try{
+      const d=await api("GET","/api/export");
+      d.client={user_agent:navigator.userAgent, viewport:innerWidth+"x"+innerHeight};
+      const text=JSON.stringify(d);
+      let shared=false;
+      try{
+        if (window.CXNative && typeof window.CXNative.shareText==="function"){
+          window.CXNative.shareText(text); shared=true;
+        }
+      }catch(e){ shared=false; }
+      if (!shared){ copyText(text); msg.textContent="本环境无原生分享，已复制到剪贴板（"+Math.round(text.length/1024)+" KB）"; }
+      else { msg.textContent="已调起系统分享（"+Math.round(text.length/1024)+" KB，密钥已屏蔽）"; }
+    }catch(e){ msg.className="msgline bad"; msg.textContent="导出失败："+e.message; }
+    finally{ btn.disabled=false; }
   };
 }
 function diagHtml(d){

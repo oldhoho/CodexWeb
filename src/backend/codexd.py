@@ -3860,6 +3860,172 @@ def async_exec_worker(job, timeout):
             job["ended"] = time.time()
 
 
+# -------------------------------------------------------- diagnostic export
+# One-tap "导出实机数据": a scrubbed JSON bundle the user can share straight
+# from the WebView for offline analysis. Intent EXTRA_TEXT travels through
+# Binder, so keep the whole payload well under 1 MB (chars, not tokens).
+EXPORT_CHAR_BUDGET = 260000
+EXPORT_FULL_TURNS = 24          # newest turns keep event/reasoning detail
+EXPORT_EVENT_ITEMS = 80
+EXPORT_LOG_LINES = 200
+EXPORT_LOG_BYTES = 262144
+EXPORT_SECRET_KEYS = re.compile(
+    r"(?i)^(api[_-]?key|key|secret|pin|cookie|authorization|credential|password|session_secret)$")
+
+
+def _export_clip(value, limit=1500):
+    s = "" if value is None else str(value)
+    return s if len(s) <= limit else s[:limit] + "\n…[已截断 %d 字]" % (len(s) - limit)
+
+
+def _export_clean(obj, limit=1500, depth=0):
+    """Scrub secrets, drop oversized strings/lists. Never mutate the source."""
+    if depth > 6:
+        return _export_clip(obj, 120)
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            key = str(k)
+            if EXPORT_SECRET_KEYS.match(key):
+                out[key] = "***"
+            else:
+                out[key] = _export_clean(v, limit, depth + 1)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [_export_clean(v, limit, depth + 1) for v in list(obj)[:EXPORT_EVENT_ITEMS]]
+    if isinstance(obj, str):
+        return scrub(_export_clip(obj, limit))
+    return obj
+
+
+def _export_log_tail():
+    try:
+        size = os.path.getsize(LOG_PATH)
+        with open(LOG_PATH, "rb") as f:
+            f.seek(max(0, size - EXPORT_LOG_BYTES))
+            data = f.read().decode("utf-8", "replace")
+        return [scrub(line) for line in data.splitlines()[-EXPORT_LOG_LINES:]]
+    except OSError:
+        return []
+
+
+def _export_version():
+    paths = [os.path.join(os.path.dirname(UI_DIR.rstrip("/")), ".payload-version"),
+             "/codexweb/.payload-version"]
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            continue
+    return ""
+
+
+def _export_turn(rec, full):
+    ev = rec.get("events") if isinstance(rec.get("events"), list) else []
+    item = {
+        "id": rec.get("id"), "ts": rec.get("ts"), "session": rec.get("session"),
+        "mode": rec.get("mode"), "effort": rec.get("effort"),
+        "user_input": _export_clean(rec.get("user_input"), 12000),
+        "effective_prompt": _export_clean(rec.get("effective_prompt"), 12000),
+        "prompt_sent": _export_clean(rec.get("prompt_sent"), 20000),
+        "system_prompt": _export_clean(rec.get("system_prompt"), 12000),
+        "assistant_msg": _export_clean(rec.get("assistant_msg"), 20000),
+        "usage": _export_clean(rec.get("usage"), 2000),
+        "result": _export_clean(rec.get("result"), 2000),
+        "injections": _export_clean(rec.get("injections"), 2000),
+        "sources": _export_clean(_turn_sources(ev), 1000),
+        "attachment_names": [str(a.get("name") or "") for a in (rec.get("attachments") or [])
+                             if isinstance(a, dict)],
+        "event_count": len(ev),
+    }
+    if full:
+        item["reasoning"] = _export_clean(_turn_reasoning(ev), 6000)
+        item["events"] = [_export_clean({"event": e.get("event"), "data": e.get("data")}, 1500)
+                          for e in ev[:EXPORT_EVENT_ITEMS] if isinstance(e, dict)]
+    else:
+        item["events_omitted"] = True
+    return item
+
+
+def export_bundle():
+    """Build a size-capped, secret-scrubbed diagnostic bundle.
+
+    Newest turns get full event detail; older ones keep text + usage so cache
+    and search regressions remain measurable without shipping the whole log.
+    """
+    cfg = read_config()
+    sec = sec_state()
+    sec_tail = sec_recent_worklog()
+    bundle = {
+        "format": "codexweb-diagnostics-v1",
+        "exported_at": int(time.time()),
+        "app_version": _export_version(),
+        "backend": {"port": PORT, "root": ROOT},
+        "model": {"base_url": scrub(configured_base_url()),
+                  "model": configured_model(),
+                  "key_configured": bool(load_api_key())},
+        "caps": _export_clean(read_caps()),
+        "config": {"rev": cfg["rev"], "config": _export_clean(cfg["config"])},
+        "skills": _export_clean(read_skills()),
+        "secretary": {
+            "persona": _export_clip(sec.get("persona"), 8000),
+            "human": _export_clip(sec.get("human"), 8000),
+            "notes": _export_clip(sec.get("notes"), 8000),
+            "meta": {k: sec.get(k) for k in ("pending", "threshold", "last_compile",
+                                            "budget", "configured")},
+            "worklog_tail": _export_clip(sec_tail, 12000),
+        },
+        "diag": _export_clean(getattr(RUNNER, "diag", None), 2000),
+        "log_tail": _export_log_tail(),
+        "sessions": [],
+    }
+    # list_sessions() sorts by id; within the same minute the random suffix can
+    # invert recency. Export by mtime so the newest session always wins budget.
+    sessions = sorted(list_sessions(), key=lambda s: s.get("mtime", 0), reverse=True)
+    used = 0
+    full_left = EXPORT_FULL_TURNS
+    truncated = False
+    total_turns = 0
+    for s in sessions:
+        sid = s["id"]
+        try:
+            count = int(history_sig(sid).get("count") or 0)
+        except (Bad, OSError):
+            count = 0
+        total_turns += count
+        if not count:
+            continue
+        row = {"id": sid, "title": s.get("title"), "group": s.get("group"),
+               "pinned": s.get("pinned"), "mode": s.get("mode"),
+               "mtime": s.get("mtime"), "turn_count": count,
+               "memory": _export_clip(read_memory(sid), 4000), "turns": []}
+        for rec in reversed(list_context(sid, limit=min(count, 400))):
+            item = _export_turn(rec, full_left > 0)
+            size = len(json.dumps(item, ensure_ascii=False))
+            if used + size > EXPORT_CHAR_BUDGET:
+                truncated = True
+                break
+            used += size
+            row["turns"].append(item)
+            if full_left > 0:
+                full_left -= 1
+        if row["turns"]:
+            row["turns"].reverse()
+            if truncated:
+                row["truncated"] = True
+            bundle["sessions"].append(row)
+        if truncated:
+            break
+    bundle["stats"] = {"sessions": len(sessions), "turns": total_turns,
+                       "exported_turns": sum(len(s["turns"]) for s in bundle["sessions"]),
+                       "approx_chars": used, "truncated": truncated,
+                       "full_turns": EXPORT_FULL_TURNS - full_left}
+    log("diagnostic export: %d sessions / %d turns / %d chars"
+        % (len(bundle["sessions"]), bundle["stats"]["exported_turns"], used))
+    return bundle
+
+
 # ------------------------------------------------------------------ HTTP
 STATIC = {"/": "index.html", "/index.html": "index.html"}
 
@@ -3995,6 +4161,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
 
     def dispatch(self, method, path, q):
+        if path == "/api/export" and method == "GET":
+            return self.send_json(export_bundle())
         if path == "/api/sessions" and method == "GET":
             return self.send_json({"sessions": list_sessions()})
         if path == "/api/sessions" and method == "POST":
