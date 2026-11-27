@@ -123,7 +123,7 @@ SEC_NOTES_FILE = os.path.join(SECRETARY_DIR, "notes.md")
 SEC_PERSONA_FILE = os.path.join(SECRETARY_DIR, "persona.md")
 SEC_HUMAN_FILE = os.path.join(SECRETARY_DIR, "human.md")
 SEC_META_FILE = os.path.join(SECRETARY_DIR, "meta.json")
-SEC_PERSONA_BUDGET = 1200   # chars of the compiled 秘书画像 injected per turn
+SEC_PERSONA_BUDGET = 1200   # chars of the compiled 助手画像 injected per turn
 SEC_HUMAN_BUDGET = 1200     # chars of the compiled 用户档案 injected per turn
 SEC_WORKLOG_KEEP_DAYS = 30  # compile reads at most this many recent daily logs
 SEC_COMPILE_THRESHOLD = 8   # default: suggest recompile after N new log entries
@@ -1756,7 +1756,7 @@ class Runner:
         explicit = [i for i in (job.get("ctx", {}).get("injections") or [])
                     if isinstance(i, dict)]
         if not base or not key:
-            label = "秘书" if str(job.get("ctx", {}).get("mode") or "") == "secretary" else "纯对话"
+            label = "助手" if str(job.get("ctx", {}).get("mode") or "") == "secretary" else "纯对话"
             self.emit(job, "error", {"message": label + "需要先在「设置 → 模型与 API」配置 Key 与 Base URL"})
             self._finish(job, None, "")
             return
@@ -1766,12 +1766,14 @@ class Runner:
         ctx["prompt_sent"] = job["prompt"]
         sid = job["sid"]
         caps = read_caps()
-        # Secretary mode: replace the (empty) client system prompt with the
-        # COMPILED persona + human + fixed record contract. These files only
-        # change on a compile, so they sit in the frozen prefix byte-stably.
+        # Secretary mode: replace the (empty) client system prompt with a
+        # SESSION-FROZEN snapshot of persona + human + the record contract.
+        # The snapshot is seeded once on the session's first assistant turn;
+        # later edits/compiles never change these bytes, so the cached prefix
+        # survives profile maintenance. Only a new session picks up updates.
         is_secretary = str(job.get("ctx", {}).get("mode") or "") == "secretary"
         if is_secretary:
-            ctx["system_prompt"] = sec_system_prompt()
+            ctx["system_prompt"] = sec_session_prompt(job["sid"])
         # tools stickiness is still needed: declaring the web-search schema
         # changes the request prefix, so once a session enables it we keep it.
         want_search = bool(ctx.get("search"))
@@ -2830,18 +2832,53 @@ def sec_recent_worklog():
 
 
 def sec_system_prompt():
-    """Frozen system block for secretary mode: compiled persona + human + the
-    fixed record contract. Byte-stable until a compile rewrites a file."""
+    """Build the secretary system block from the CURRENT material files.
+
+    Used only to seed a brand-new session's frozen snapshot. Do NOT call this
+    on every turn: editing persona/human/notes or compiling would change the
+    bytes mid-session and destroy the cached prefix. Turns read the snapshot
+    via sec_session_prompt() instead.
+    """
     persona = sec_read_file(SEC_PERSONA_FILE).strip()[:SEC_PERSONA_BUDGET]
     human = sec_read_file(SEC_HUMAN_FILE).strip()[:SEC_HUMAN_BUDGET]
     blocks = []
     if persona:
-        blocks.append("【秘书画像 · persona】\n" + persona)
+        blocks.append("【助手画像 · persona】\n" + persona)
     if human:
         blocks.append("【关于用户 · human】\n" + human)
-    blocks.append("你是用户的私人秘书：可靠、克制、有分寸；不确定就明说，绝不编造记忆。")
+    blocks.append("你是用户的私人助手：可靠、克制、有分寸；不确定就明说，绝不编造记忆。")
     blocks.append(SEC_RECORD_CONTRACT.strip())
     return "\n\n".join(blocks)
+
+
+def sec_session_prompt_path(sid):
+    """Per-session frozen copy of the assistant system prompt."""
+    return os.path.join(session_path(sid), CTX_DIR, "secretary_prefix.txt")
+
+
+def sec_session_prompt(sid):
+    """Return this session's frozen system prompt, creating it on first use.
+
+    A session keeps the exact prefix it started with, so the user can edit the
+    assistant profile/notes/worklog or recompile at any time without breaking
+    the in-flight cache. Only a NEW session picks up the updated material.
+    Older sessions with no snapshot are seeded from today's files once; their
+    first assistant turn is a cold start anyway.
+    """
+    p = sec_session_prompt_path(sid)
+    try:
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        pass
+    snap = sec_system_prompt()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(snap)
+    os.replace(tmp, p)
+    log("secretary: froze system prefix for session %s (%d chars)" % (sid, len(snap)))
+    return snap
 
 
 def sec_compile():
@@ -2852,16 +2889,16 @@ def sec_compile():
     old_persona = sec_read_file(SEC_PERSONA_FILE).strip()[:SEC_PERSONA_BUDGET]
     old_human = sec_read_file(SEC_HUMAN_FILE).strip()[:SEC_HUMAN_BUDGET]
     if not worklog and not notes and not old_persona and not old_human:
-        raise Bad("还没有可编译的素材：先聊聊、让秘书记几条工作记录，或写点用户笔记")
+        raise Bad("还没有可编译的素材：先聊聊、让助手记几条工作记录，或写点用户笔记")
     prompt = (
-        "你是长期记忆编译器。把下面的素材编译成两份稳定的画像文档，供另一个 AI 秘书在每次对话时常驻使用。\n\n"
+        "你是长期记忆编译器。把下面的素材编译成两份稳定的画像文档，供另一个 AI 助手在每次对话时常驻使用。\n\n"
         "规则：\n"
-        "1. persona（秘书画像）：描述这个秘书应以什么语气、详略、主动性、称呼、禁忌来回应这位用户——"
-        "是「秘书自己的人设与相处方式」，不是用户档案。\n"
+        "1. persona（助手画像）：描述这个助手应以什么语气、详略、主动性、称呼、禁忌来回应这位用户——"
+        "是「助手自己的人设与相处方式」，不是用户档案。\n"
         "2. human（用户档案）：描述用户的身份背景、偏好、在意什么、避开什么、长期目标——是「关于用户」的记录。\n"
         "3. 只用素材里有依据的内容，不要编造；与旧文档冲突时以新素材为准并保留仍然有效的部分。\n"
         "4. 每份用简洁的中文分点，不要序号外的花哨格式。\n\n"
-        "【工作日志】\n%s\n\n【用户笔记】\n%s\n\n【现有秘书画像】\n%s\n\n【现有用户档案】\n%s\n\n"
+        "【工作日志】\n%s\n\n【用户笔记】\n%s\n\n【现有助手画像】\n%s\n\n【现有用户档案】\n%s\n\n"
         "只输出一个 JSON 对象，键为 persona 和 human，值为字符串，不要任何解释文字或代码块标记。"
         % (worklog[:12000] or "（空）", notes or "（空）",
            old_persona or "（空）", old_human or "（空）")

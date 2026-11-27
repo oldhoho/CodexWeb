@@ -691,7 +691,7 @@ svg{display:block;flex-shrink:0}
         <button class="navItem active" data-tool="chat"><svg class="ic"><use href="#i-logo"/></svg>对话</button>
         <button class="navItem" data-tool="term"><svg class="ic"><use href="#i-terminal"/></svg>终端<span class="tag">原生</span></button>
         <button class="navItem" data-tool="files"><svg class="ic"><use href="#i-files"/></svg>文件管理</button>
-        <button class="navItem" data-tool="secretary"><svg class="ic"><use href="#i-prompt"/></svg>我的秘书</button>
+        <button class="navItem" data-tool="secretary"><svg class="ic"><use href="#i-prompt"/></svg>我的助手</button>
       </div>
       <div class="navGroup"><div class="navLabel">工具箱</div>
         <button class="navItem" data-tool="capture"><svg class="ic"><use href="#i-capture"/></svg>网络抓包<span class="tag">工具</span></button>
@@ -757,7 +757,7 @@ svg{display:block;flex-shrink:0}
                 <button data-mode="chat">纯对话</button>
                 <button data-mode="device">手机控制</button>
                 <button data-mode="custom">自定义</button>
-                <button data-mode="secretary">秘书</button>
+                <button data-mode="secretary">助手</button>
               </div>
             </div>
             <div class="attachTray" id="attachTray"></div>
@@ -917,7 +917,7 @@ svg{display:block;flex-shrink:0}
           <h2>提示词与工作模式</h2><p>这里统一配置「发什么指令」和「怎么思考」。工作模式决定推理强度与各类指令开关，系统词预设决定注入的角色内容，二者共同影响每条发送给 Codex 的消息。</p>
         </div></div>
         <div class="panel"><h3>工作模式</h3>
-          <p>六个模式的名称与全部配置都能自定义，改动立即生效并保存在本机。选中一个模式，在下方改它的名字、说明、推理强度、思考/搜索/系统词开关，以及它携带的系统词预设；不同会话仍各自记住当前模式。「秘书」模式的长期记忆在「我的秘书」页管理。</p>
+          <p>六个模式的名称与全部配置都能自定义，改动立即生效并保存在本机。选中一个模式，在下方改它的名字、说明、推理强度、思考/搜索/系统词开关，以及它携带的系统词预设；不同会话仍各自记住当前模式。「助手」模式的长期记忆在「我的助手」页管理。</p>
           <div class="modeWrap">
             <div class="modeSeg" id="promptModeSeg">
               <button data-mode="full">全能</button>
@@ -925,7 +925,7 @@ svg{display:block;flex-shrink:0}
               <button data-mode="chat">纯对话</button>
               <button data-mode="device">手机控制</button>
               <button data-mode="custom">自定义</button>
-              <button data-mode="secretary">秘书</button>
+              <button data-mode="secretary">助手</button>
             </div>
             <span class="modeDesc" id="promptModeDesc"></span>
           </div>
@@ -1011,7 +1011,7 @@ svg{display:block;flex-shrink:0}
       <!-- SECRETARY -->
       <section class="view" id="view-secretary"><div class="toolPage"><div class="toolInner">
         <div class="toolHero"><div class="hicon"><svg class="ic"><use href="#i-prompt"/></svg></div><div>
-          <h2>我的秘书</h2><p>跨会话长期记忆与稳定人格。秘书在完成任务时自动记工作日志、在你明确要求时记笔记；点「编译画像」把素材整理成两份常驻文档。</p>
+          <h2>我的助手</h2><p>跨会话长期记忆与稳定人格。助手在完成任务时自动记工作日志、在你明确要求时记笔记；点「编译画像」把素材整理成两份常驻文档。</p>
         </div></div>
         <div class="secActions">
           <button class="btn primary" id="secCompile">编译画像</button>
@@ -1131,13 +1131,13 @@ const MODE_DEFAULTS = {
   chat:   {name:"纯对话", effort:"minimal", think:false, search:false, prompt:false},
   device: {name:"手机控制", effort:"minimal", think:false, search:false, prompt:false},
   custom: {name:"自定义", effort:"medium",  think:false, search:false, prompt:true},
-  secretary: {name:"秘书", effort:"low", think:false, search:false, prompt:false},
+  secretary: {name:"助手", effort:"low", think:false, search:false, prompt:false},
 };
 const MODE_LABEL_FALLBACK = {
   full:"全部工具 + 高强度推理", lite:"基础工具 + 低推理",
   chat:"极简直连 API，零系统提示/零工具，最省 Token",
   device:"从技能模块编排流程，不能自由操控手机", custom:"自定义选项",
-  secretary:"跨会话私人秘书，长期记忆 + 稳定人格",
+  secretary:"跨会话私人助手，长期记忆 + 稳定人格",
 };
 // modeDefs[key] = {name, desc, effort, think, search, prompt, promptId}
 //   promptId = id of the system-prompt preset this mode carries; "" = none.
@@ -2358,7 +2358,7 @@ async function send(){
   const st = await refreshApiStatus(false);
   if (isPlain){
     if (!st || !st.direct_ok){
-      toast((workMode==="device"?"手机控制":workMode==="secretary"?"秘书":"纯对话")+"需要先到「设置 → 模型与 API」填写 Key 与 Base URL");
+      toast((workMode==="device"?"手机控制":workMode==="secretary"?"助手":"纯对话")+"需要先到「设置 → 模型与 API」填写 Key 与 Base URL");
       switchTool("settings"); return;
     }
   } else {
@@ -3100,7 +3100,7 @@ $("reviewCopyAll").onclick=async()=>{
 /* ---------- tool switching ---------- */
 const TOOL_META = {
   chat:{name:"对话", icon:"i-logo"}, term:{name:"终端", icon:"i-terminal"},
-  secretary:{name:"我的秘书", icon:"i-prompt"},
+  secretary:{name:"我的助手", icon:"i-prompt"},
   files:{name:"文件管理", icon:"i-files"}, capture:{name:"网络抓包", icon:"i-capture"},
   apk:{name:"APK 工具", icon:"i-apk"}, skills:{name:"模块 DIY", icon:"i-prompt"},
   phone:{name:"手机控制", icon:"i-terminal"},
@@ -3811,8 +3811,8 @@ async function loadSecretary(){
   pend.style.color = d.pending>=d.threshold?"var(--brand-text)":"";
   if(!d.configured) pend.textContent += " · 未配置 API，无法编译";
   grid.innerHTML =
-    '<div class="secCard"><h3>秘书画像 persona <span class="secCount">'+d.persona.length+' / '+b.persona+' 字</span></h3>'+
-    '<p class="sdesc">秘书自己的人设：语气、详略、主动性、称呼、禁忌。由编译生成，也可手动改。</p>'+
+    '<div class="secCard"><h3>助手画像 persona <span class="secCount">'+d.persona.length+' / '+b.persona+' 字</span></h3>'+
+    '<p class="sdesc">助手自己的人设：语气、详略、主动性、称呼、禁忌。由编译生成，也可手动改。</p>'+
     '<textarea class="secTa" id="secPersona" placeholder="还没有画像，聊几轮后点「编译画像」">'+esc(d.persona)+'</textarea>'+
     '<button class="btn secSave" data-sec-save="persona">保存画像</button></div>'+
     '<div class="secCard"><h3>用户档案 human <span class="secCount">'+d.human.length+' / '+b.human+' 字</span></h3>'+
@@ -3820,11 +3820,11 @@ async function loadSecretary(){
     '<textarea class="secTa" id="secHuman" placeholder="还没有档案，聊几轮后点「编译画像」">'+esc(d.human)+'</textarea>'+
     '<button class="btn secSave" data-sec-save="human">保存档案</button></div>'+
     '<div class="secCard"><h3>用户笔记 <span class="secCount">'+d.notes.length+' 字</span></h3>'+
-    '<p class="sdesc">你说「记住……」时秘书自动记下，也可在这里手动编辑。去重保存。</p>'+
+    '<p class="sdesc">你说「记住……」时助手自动记下，也可在这里手动编辑。去重保存。</p>'+
     '<textarea class="secTa" id="secNotes" placeholder="例如：不吃辣，汇报先说结论">'+esc(d.notes)+'</textarea>'+
     '<button class="btn secSave" data-sec-save="notes">保存笔记</button></div>'+
     '<div class="secCard"><h3>工作日志 <span class="secCount">只增不改</span></h3>'+
-    '<p class="sdesc">秘书完成任务时自动精简记录。编译读取最近 '+30+' 天。上次编译：'+esc(last)+'</p>'+
+    '<p class="sdesc">助手完成任务时自动精简记录。编译读取最近 '+30+' 天。上次编译：'+esc(last)+'</p>'+
     '<div class="secLog" id="secLog">加载中…</div>'+
     '<div class="providerRow" style="margin-top:10px"><span class="hint" style="margin:0">提醒阈值</span>'+
     '<input class="field" id="secThreshold" type="number" min="1" max="100" value="'+d.threshold+'" style="width:70px;height:34px;margin:0">'+
@@ -3838,14 +3838,14 @@ async function loadSecLog(){
   const box=$("secLog"); if(!box) return;
   try{
     const r=await api("GET","/api/secretary/worklog");
-    box.textContent = r.text ? r.text : "（还没有工作日志。切到「秘书」模式聊几轮，完成明确任务后会自动记录。）";
+    box.textContent = r.text ? r.text : "（还没有工作日志。切到「助手」模式聊几轮，完成明确任务后会自动记录。）";
   }catch(e){ box.textContent="加载失败："+e.message; }
 }
 async function secSave(kind){
   try{
     if(kind==="persona"||kind==="human"){
       await api("POST","/api/secretary/artefact",{which:kind,text:$(kind==="persona"?"secPersona":"secHuman").value});
-      toast((kind==="persona"?"秘书画像":"用户档案")+"已保存，下一轮生效");
+      toast((kind==="persona"?"助手画像":"用户档案")+"已保存，新会话生效（当前会话前缀保持不变）");
     } else if(kind==="notes"){
       const r=await api("POST","/api/secretary/notes",{text:$("secNotes").value});
       $("secNotes").value=r.notes||""; toast("用户笔记已保存");
@@ -3857,7 +3857,7 @@ async function secSave(kind){
   }catch(e){ toast("保存失败："+e.message); }
 }
 if($("secCompile")) $("secCompile").onclick=async()=>{
-  if(!confirm("编译会读取工作日志与用户笔记，生成新的秘书画像和用户档案。\n这会改变对话前缀，下一轮缓存命中会重新计算（之后恢复）。\n\n确定编译吗？")) return;
+  if(!confirm("编译会读取工作日志与用户笔记，生成新的助手画像和用户档案。\n新会话将使用新画像；当前会话保持原有前缀不变，缓存不受影响。\n\n确定编译吗？")) return;
   const btn=$("secCompile"), old=btn.textContent; btn.textContent="编译中…"; btn.disabled=true;
   try{
     const r=await api("POST","/api/secretary/compile",{});
@@ -4177,7 +4177,7 @@ async function renderGuide(){
 <button class="btn" id="diagRefresh" style="margin-top:8px">刷新诊断</button>
 <button class="btn primary" id="exportBundle" style="margin-top:8px">一键导出实机数据</button>
 <div class="msgline" id="exportMsg"></div>
-<p class="hint">导出内容：工作模式 / 提示词 / 技能模块 / 秘书记忆 / 全部会话的对话与用量（最近 24 轮含完整事件与搜索来源）/ 最近 200 行日志。API Key、Token、PIN 与附件正文一律屏蔽；一次导出上限约 260KB（系统分享的文本限制），超出会优先保留最新数据。点按钮后走系统分享，直接发给 WorkBuddy 即可让我分析。</p>
+<p class="hint">导出内容：工作模式 / 提示词 / 技能模块 / 助手记忆 / 全部会话的对话与用量（最近 24 轮含完整事件与搜索来源）/ 最近 200 行日志。API Key、Token、PIN 与附件正文一律屏蔽；一次导出上限约 260KB（系统分享的文本限制），超出会优先保留最新数据。点按钮后走系统分享，直接发给 WorkBuddy 即可让我分析。</p>
 <h2>当前 config.toml</h2>
 <pre>${esc(g.config||defaultConfig())}</pre>`;
   $("diagRefresh").onclick=async()=>{
