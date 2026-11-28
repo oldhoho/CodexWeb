@@ -197,6 +197,12 @@ CTX_TURN_REMINDER = (
 CTX_TOPICS_HEADER = "【已知历史话题清单】"
 CTX_TOPICS_FOOTER = "。以上是你之前标记过的旧话题，判断是否回到旧话题时以此为准。"
 CTX_TOPICS_MAX = 12
+# P2 (2026-11-28): boundary-side archival/re-anchor is ON by default. Recall
+# is NEVER executed automatically -- it only emits a suggestion the user must
+# confirm. Set CODEXWEB_P2=0 to fall back to pure P1 observe-only (tests use
+# this to keep the original assertion surface).
+CTX_P2_ENABLED = os.environ.get("CODEXWEB_P2", "1") not in ("0", "false", "False")
+CTX_RESTORE_KEY = "ctx_restore"   # session-meta key holding a confirmed topic restore
 TOPIC_CARDS_FILE = "topic_cards.json"        # per-session, inside .cxweb/
 TOPIC_SUMMARY_BUDGET = 240                   # chars per archived topic card
 TOPIC_RECALL_N = 4                           # recent turns compared on recall
@@ -935,7 +941,12 @@ def list_context(sid, limit=200):
     # meta.json / compact_snap.json store session state, not review turns.
     # compact_snap.json used to be read as a bogus ts=0 turn, which inflated
     # the turn count used by auto_title and the compact anchor by one.
-    NON_TURN_FILES = ("meta.json", COMPACT_SNAP_FILE)
+    # P2: topic_cards.json / ctx_restore.json are session state, NOT turns.
+    # Without this they were read as bogus ts=0 turns -- which broke the
+    # boundary AND guard (prev became a state file -> overlap 0) and inflated
+    # turn_count used by the lifecycle hook.
+    NON_TURN_FILES = ("meta.json", COMPACT_SNAP_FILE, TOPIC_CARDS_FILE,
+                      "ctx_restore.json", "ctx_dismissed.json")
     names = sorted((n for n in os.listdir(d)
                     if n.endswith(".json") and n not in NON_TURN_FILES), reverse=True)
     for name in names[:limit]:
@@ -1901,6 +1912,16 @@ class Runner:
             text = scrub(str(item.get("text") or "")).strip()
             if text:
                 instr_lines.append("[%s] %s" % (kind, text))
+        # P2b: a user-confirmed topic restore is injected ONCE as an explicit
+        # instruction, then consumed. Never automatic -- only set by the
+        # /api/topic/restore call after the user taps "恢复". One prefix miss
+        # is acceptable for an explicit recovery action.
+        restore = read_restore(sid) if CTX_P2_ENABLED else None
+        if restore:
+            hint = "[已恢复话题 · %s]" % restore.get("topic", "")
+            if restore.get("summary"):
+                hint += "\n" + str(restore["summary"])
+            instr_lines.append(hint)
         # Cache-friendly assembly: frozen system prefix + append-only history.
         # ALWAYS build history: caps only control memory/summary blocks, never
         # whether prior turns are replayed. Skipping history when both caps
@@ -1914,6 +1935,10 @@ class Runner:
             system_prompt=str(ctx.get("system_prompt") or ""),
             instructions=instr_lines, web_search_capable=tools_on,
             ctx_contract=want_ctx_contract)
+        if restore:
+            clear_restore(sid)
+            log("ctx restore injected sid=%s card=%s -> cleared" %
+                (sid, restore.get("card_id")))
         # Record injections so the review view stays honest.
         inj = ctx.setdefault("injections", [])
         for p in parts:
@@ -3428,6 +3453,66 @@ def write_topic_cards(sid, data):
                   json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def restore_path(sid):
+    return os.path.join(session_path(sid), CTX_DIR, "ctx_restore.json")
+
+
+def read_restore(sid):
+    """Pending confirmed topic restore: {"topic","summary","card_id","ts"}.
+    Consumed (cleared) after it has been injected once into a fresh prompt."""
+    try:
+        with open(restore_path(sid), encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and str(d.get("topic") or "").strip():
+            return d
+    except (OSError, ValueError, TypeError, Bad):
+        pass
+    return None
+
+
+def clear_restore(sid):
+    try:
+        os.unlink(restore_path(sid))
+    except OSError:
+        pass
+
+
+def dismissed_path(sid):
+    return os.path.join(session_path(sid), CTX_DIR, "ctx_dismissed.json")
+
+
+def is_suggestion_dismissed(sid, turn_id):
+    try:
+        with open(dismissed_path(sid), encoding="utf-8") as f:
+            d = json.load(f)
+        return str(turn_id) in (d.get("turns") or [])
+    except (OSError, ValueError, TypeError, Bad):
+        return False
+
+
+def dismiss_suggestion(sid, turn_id):
+    """Remember that the user already decided on this recall suggestion so it
+    never reappears on later turns."""
+    try:
+        with open(dismissed_path(sid), encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError, TypeError, Bad):
+        d = {}
+    turns = d.get("turns") if isinstance(d.get("turns"), list) else []
+    if str(turn_id) not in turns:
+        turns.append(str(turn_id))
+    write_private(dismissed_path(sid), json.dumps({"turns": turns[-50:]}, ensure_ascii=False))
+
+
+def set_restore(sid, topic, summary, card_id):
+    """Called only after the user explicitly confirms a recall suggestion."""
+    write_private(restore_path(sid), json.dumps(
+        {"topic": str(topic or "")[:40], "summary": str(summary or "")[:TOPIC_SUMMARY_BUDGET],
+         "card_id": str(card_id or ""), "ts": int(time.time())}, ensure_ascii=False))
+    log("ctx restore queued sid=%s card=%s topic=%s (injected next turn)" %
+        (sid, card_id, topic))
+
+
 def _lex_tokens(text):
     """stdlib-only lexer for Jaccard boundary guard. CJK has no spaces, so we
     use BOTH single chars (unigram) and adjacent pairs (bigram) per CJK run;
@@ -3503,15 +3588,109 @@ def boundary_guard(sid, user_input, current_turn_id=None):
     return overlap, veto
 
 
-def apply_topic_lifecycle(sid, ctx_meta, user_input="", current_turn_id=None):
-    """P1 HOOK: observe only. Logs the boundary signal but does NOT archive,
-    re-anchor, fold, or recall. Kept as a single funnel so P2 can turn on the
-    real lifecycle without touching call sites. Returns a small observation
-    dict for tests/diagnostics. Never raises.
+def _card_summary_for_turn(sid, turn_id, limit=200):
+    """Short deterministic summary text for one persisted turn. Pure read."""
+    try:
+        with open(os.path.join(session_path(sid), CTX_DIR, str(turn_id) + ".json"),
+                  encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError, TypeError, Bad):
+        return ""
+    u = _WS_RE.sub(" ", str(rec.get("user_input") or "").strip())[:120]
+    ans = ""
+    for e in (rec.get("events") or []):
+        if e.get("event") == "message" and isinstance(e.get("data"), dict):
+            ans = _WS_RE.sub(" ", str(e["data"].get("text") or "").strip())
+            if ans:
+                break
+    parts = (("- 用户：" + u) if u else "")
+    if ans:
+        parts = (parts + "\n" if parts else "") + "  助手：" + ans[:80]
+    return parts[:limit]
 
-    `user_input`/`current_turn_id` feed the AND-guard: even if the model says
-    boundary=true, a high lexical overlap with the previous turn vetoes it.
-    P1 records the veto but does not act on it."""
+
+def _p2_archive_boundary(sid, topic, turn_count, current_turn_id):
+    """P2a: seal the active topic card and open a fresh one on a real topic
+    switch. Only touches the independent topic_cards index + a safety backup;
+    NEVER edits turn bytes or the compact anchor, so the cached prefix stays
+    append-only. Returns the archived card id (or None)."""
+    cards = read_topic_cards(sid)
+    active = next((c for c in cards["cards"] if c.get("status") == "active"), None)
+    if active is None:
+        return None
+    # A first-turn boundary is a known false positive (no prior topic to
+    # close): never archive an empty card on turn 1.
+    if turn_count <= 1 or not str(active.get("title") or "").strip():
+        active["title"] = str(topic or "")[:40]
+        active["covered_turn"] = turn_count
+        write_topic_cards(sid, cards)
+        return None
+    try:
+        backup_session(sid, "boundary")
+    except OSError as ex:
+        log("ctx boundary backup failed: %s" % scrub(str(ex)))
+    active["status"] = "archived"
+    active["covered_turn"] = max(int(active.get("covered_turn") or 0), turn_count - 1)
+    if not str(active.get("title") or "").strip():
+        active["title"] = str(active.get("topic") or "旧话题")[:40]
+    summary = _card_summary_for_turn(sid, current_turn_id)
+    if summary:
+        active["summary"] = (str(active.get("summary") or "") + "\n" + summary).strip()[-TOPIC_SUMMARY_BUDGET:]
+    nid = "t%d" % int(cards.get("next_id") or 2)
+    cards["next_id"] = int(cards.get("next_id") or 2) + 1
+    cards["cards"].append({
+        "id": nid, "title": str(topic or "")[:40], "status": "active",
+        "started_turn": turn_count, "covered_turn": turn_count,
+        "summary": "", "entities": [],
+    })
+    write_topic_cards(sid, cards)
+    log("ctx P2a archived %s title=%s -> new %s" %
+        (active.get("id"), active.get("title"), nid))
+    return str(active.get("id"))
+
+
+def _p2_recall_suggestion(sid, topic, current_turn_id):
+    """P2b (suggest-only): find the best matching archived card and write a
+    suggestion into THIS turn's ctx_meta. Never re-anchors or injects -- the
+    client shows a confirm prompt and only a confirmed action calls restore."""
+    try:
+        cards = read_topic_cards(sid)
+        archived = [c for c in cards.get("cards", [])
+                    if c.get("status") == "archived" and str(c.get("title") or "").strip()]
+        want = str(topic or "").strip()
+        match = None
+        if want:
+            for c in archived:
+                title = str(c.get("title") or "")
+                if want.lower() == title.lower() or want.lower() in title.lower() or title.lower() in want.lower():
+                    match = c
+                    break
+        if match is None and archived:
+            match = archived[-1]  # newest archived topic as a soft fallback
+        if match is None:
+            return None
+        suggestion = {"topic": str(match.get("title") or "")[:40],
+                      "card_id": str(match.get("id") or ""), "turn": str(current_turn_id or "")}
+        # Write into the just-persisted turn so /api/context carries it.
+        tp = os.path.join(session_path(sid), CTX_DIR, str(current_turn_id) + ".json")
+        with open(tp, encoding="utf-8") as f:
+            rec = json.load(f)
+        rec.setdefault("ctx_meta", {})["recall_suggestion"] = suggestion
+        write_private(tp, json.dumps(rec, ensure_ascii=False))
+        log("ctx P2b suggestion sid=%s card=%s topic=%s (no auto restore)" %
+            (sid, suggestion["card_id"], suggestion["topic"]))
+        return suggestion
+    except (OSError, ValueError, TypeError, Bad) as ex:
+        log("ctx P2b suggestion failed: %s" % scrub(str(ex)))
+        return None
+
+
+def apply_topic_lifecycle(sid, ctx_meta, user_input="", current_turn_id=None):
+    """P1 hook -> P2 funnel. Always records the observation dict (unchanged
+    keys/values for backtests). When CTX_P2_ENABLED, boundary_effective=true
+    ALSO archives/re-anchors via the independent topic-card index, and
+    recall=true ALSO writes a *suggestion* (never an automatic restore).
+    Single seam: both call sites stay untouched. Never raises."""
     obs = {"boundary": False, "recall": False, "topic": "", "action": "observe",
            "boundary_veto": False, "overlap": None}
     try:
@@ -3540,21 +3719,26 @@ def apply_topic_lifecycle(sid, ctx_meta, user_input="", current_turn_id=None):
         obs["boundary_effective"] = eff_boundary
 
         if eff_boundary or recall:
-            # P2 will: archive `active` with started/covered turns, merge its
-            # summary into compact_snap, reset the tail anchor, and create a
-            # new active card. For recall, P3 re-injects 1-2 matching archived
-            # cards at the re-anchor point. P1 only records the decision.
             log("ctx lifecycle OBSERVE %s sid=%s topic=%s "
-                "active=%s turns=%d overlap=%s (no archival in P1)"
+                "active=%s turns=%d overlap=%s"
                 % ("boundary=true" if eff_boundary else "recall=true",
                    sid, topic, active.get("id") if active else None, turn_count,
                    ("%.2f" % overlap) if overlap is not None else "-"))
             obs["action"] = "would_archive" if eff_boundary else "would_recall"
+            if CTX_P2_ENABLED:
+                if eff_boundary:
+                    archived_id = _p2_archive_boundary(sid, topic, turn_count, current_turn_id)
+                    obs["archived"] = archived_id
+                    obs["action"] = "archived" if archived_id else "would_archive"
+                elif recall:
+                    sug = _p2_recall_suggestion(sid, topic, current_turn_id)
+                    obs["suggestion"] = sug
+                    obs["action"] = "suggest_recall" if sug else "would_recall"
         elif boundary and boundary_veto:
             # Model said new topic, but lexically it is the same conversation.
             # Vetoed -> treat as continue. This is the AND gate doing its job.
             log("ctx boundary VETO sid=%s topic=%s overlap=%.2f>=%.2f "
-                "-> treat as continue (no archival in P1)"
+                "-> treat as continue"
                 % (sid, topic, overlap or 0.0, TOPIC_GUARD_MIN_OVERLAP_JACCARD))
             obs["action"] = "boundary_vetoed"
         else:
@@ -5131,6 +5315,50 @@ class Handler(BaseHTTPRequestHandler):
             sid = self.json_body().get("session")
             t = auto_title(sid)
             return self.send_json({"ok": True, "title": t})
+        if path == "/api/topic/suggestion" and method == "GET":
+            # P2b: latest recall suggestion awaiting a user decision. Read
+            # from the newest turn's ctx_meta; the client calls this right
+            # after `end` so the prompt appears on the same turn it fired.
+            sid = q.get("s", [""])[0]
+            sug = None
+            if CTX_P2_ENABLED:
+                try:
+                    for t in reversed(list_context(sid, limit=8)):
+                        m = t.get("ctx_meta")
+                        if isinstance(m, dict) and isinstance(m.get("recall_suggestion"), dict):
+                            tid = str(t.get("id") or "")
+                            if is_suggestion_dismissed(sid, tid):
+                                continue  # user already decided on this one
+                            sug = dict(m["recall_suggestion"])
+                            sug["turn"] = tid or str(sug.get("turn") or "")
+                            break
+                except (OSError, ValueError, TypeError, Bad):
+                    pass
+            return self.send_json({"suggestion": sug})
+        if path == "/api/topic/restore" and method == "POST":
+            # P2b: user CONFIRMED a recall suggestion. Queue a one-shot topic
+            # restore; it is injected into the NEXT turn's prompt, never now.
+            if not CTX_P2_ENABLED:
+                raise Bad("话题恢复未启用", 400)
+            b = self.json_body()
+            sid = str(b.get("session") or "")
+            card_id = str(b.get("card_id") or "")
+            cards = read_topic_cards(sid)
+            card = next((c for c in cards.get("cards", [])
+                         if str(c.get("id")) == card_id and c.get("status") == "archived"), None)
+            if card is None:
+                raise Bad("未找到该归档话题")
+            set_restore(sid, card.get("title"), card.get("summary"), card_id)
+            dismiss_suggestion(sid, str(b.get("turn") or ""))
+            return self.send_json({"ok": True, "topic": card.get("title"),
+                                   "note": "下一条消息起已恢复该话题背景"})
+        if path == "/api/topic/restore/dismiss" and method == "POST":
+            # User declined the suggestion: clear pending restore and mark the
+            # suggestion decided so it never reappears.
+            d = self.json_body()
+            clear_restore(str(d.get("session") or ""))
+            dismiss_suggestion(str(d.get("session") or ""), str(d.get("turn") or ""))
+            return self.send_json({"ok": True})
         if path == "/api/context/delete" and method == "POST":
             b = self.json_body()
             return self.send_json(delete_context_turn(b.get("session"), b.get("id")))

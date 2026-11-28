@@ -112,9 +112,15 @@ SDK/JDK 路径可通过环境变量 `SDK` / `JDK` 覆盖（脚本内有默认值
 
 **v88 真机复测通过**：装 v88 真机 8 轮（含 3148 字长回复）`ctx lifecycle` 标记 **8/8 = 100%**（对比 v87 约 50%），核心瓶颈确认修复。第 5 轮无触发词回旧话题也正确判 `recall=true`。详见 `CTX-v88-标记输出率探测.md` 真机复测章节。
 
-**v89（当前版本，P2 仍全缓）**：两端修复"流式输出自动滚动无法打断"——CodexWeb 前端 `src/frontend/index.html` 加 `stickToBottom` 粘性跟随（贴底才滚、发送/切会话强制贴底、滚轮/拖动打断）；Lumetro AI 窗 `AiChatOverlay.kt` 在 `followStreamScroll` 异步回调二次校验 `followIntent` 并在拖动时中止平滑动画。另加标记解析容错（单闭合符 `⟧` 误用、未闭合截断仍正确提取 topic 且边界/召回保守为 false）。方案与验证清单见 `流式输出自动滚动修复方案.md`。**P2 归档/重锚/召回继续只观察**，待 recall 样本 f1≥0.80 再放行。
+**v89**：两端修复"流式输出自动滚动无法打断"——CodexWeb 前端 `src/frontend/index.html` 加 `stickToBottom` 粘性跟随（贴底才滚、发送/切会话强制贴底、滚轮/拖动打断）；Lumetro AI 窗 `AiChatOverlay.kt` 在 `followStreamScroll` 异步回调二次校验 `followIntent` 并在拖动时中止平滑动画。另加标记解析容错（单闭合符 `⟧` 误用、未闭合截断仍正确提取 topic 且边界/召回保守为 false）。方案与验证清单见 `流式输出自动滚动修复方案.md`。
 
-**P2 上线前的离线回测门槛**（用户要求，必须用真机日志验证）：
+**v90（当前版本 · P2 上线，按 A+B 方案）**：不再死磕 recall f1 门槛，改用"降低误判代价"绕开——
+- **P2a boundary 自动归档**：`boundary_effective=true`（标记 + Jaccard AND 门双确认）且非会话首轮时，封口 active 话题卡、写摘要、`backup_session(sid,"boundary")` 备份、建新 active 卡。**只动独立的 topic_cards 索引，不改轮次字节、不推进 covered**（缓存前缀 append-only 不变，重锚仍由压缩链路自然触发）。开关 `CODEXWEB_P2=0` 可退回纯观察。
+- **P2b 建议式召回**：`recall=true` 时**绝不自动重锚**，只在当前轮 `ctx_meta` 写 `recall_suggestion={topic,card_id}`，经 `/api/topic/suggestion` 下发；两端 UI 显示"是否恢复旧话题 X"提示，用户点"恢复"才调 `/api/topic/restore` 排队一次性注入（`/api/topic/restore/dismiss` 忽略并记住，不再重复提示）。误判代价从"污染上下文"降为"一句提示"，无需 f1≥0.80。
+- 修复 P2 状态文件（`topic_cards.json`/`ctx_restore.json`/`ctx_dismissed.json`）被 `list_context` 误读成 turn 的 bug——该 bug 会让 AND 门 prev 取到状态文件、overlap 归零。
+- 专项测试 `python build/_ctx_p2_test.py`（8 组：真归档/首轮例外/AND veto/建议只写不恢复/确认恢复排队消费/dismiss 记忆/不改锚点/开关）。
+
+**离线回测脚本**（v90 起 P2 已按 A+B 上线，此脚本保留作观察/审计用途，不再是放行门槛；f1 门槛因 recall 改为建议式而自然消解）：
 
 ```bash
 # 1) 直接读 App 导出的诊断包（推荐）：log_tail + turns[].user_input 自动填标注模板

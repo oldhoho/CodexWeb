@@ -208,6 +208,11 @@ svg{display:block;flex-shrink:0}
 .modeSuggest .msTitle{font-size:13px;font-weight:600;color:var(--brand-text);margin-bottom:6px}
 .modeSuggest .msBody{font-size:12.5px;line-height:1.7;color:var(--label-2);margin-bottom:10px}
 .modeSuggest .msBtns{display:flex;gap:8px;flex-wrap:wrap}
+.recall-sug{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:10px 0;padding:10px 13px;border:1px solid var(--border-l2);border-radius:12px;background:var(--layer2);font-size:13px;line-height:1.6;color:var(--label-1)}
+.recall-sug .rs-ico{color:var(--brand-text);font-weight:500}
+.recall-sug .rs-txt{flex:1;min-width:160px}
+.recall-sug button{border:1px solid var(--border-l2);border-radius:8px;background:var(--bg);color:var(--label-1);padding:5px 12px;font-size:12.5px;cursor:pointer}
+.recall-sug .rs-yes{border-color:var(--brand-text);color:var(--brand-text)}
 .det{margin:9px 0;border:1px solid var(--border-l2);border-radius:10px;background:var(--layer2);overflow:hidden}
 .det>summary{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;font-size:12.5px;color:var(--label-2);list-style:none;user-select:none}
 .det>summary::-webkit-details-marker{display:none}
@@ -1620,6 +1625,28 @@ function addAssistant(turnId){
   attachMsgOps(el,"assistant",turnId);
   $("chatLog").appendChild(el); setEmpty(false); scrollLog(); return el;
 }
+// P2b: a recall suggestion is SHOW-ONLY. The model never auto-restores a
+// topic; the user must tap 恢复. Dismissing marks the suggestion decided so
+// it never reappears on later turns.
+async function maybeRecallSuggestion(){
+  if (!session) return;
+  let sug=null;
+  try{ const r=await api("GET","/api/topic/suggestion?s="+encodeURIComponent(session));
+       sug=r && r.suggestion; }catch(e){ return; }
+  if (!sug || !sug.topic) return;
+  const el=document.createElement("div"); el.className="recall-sug";
+  el.innerHTML='<span class="rs-ico">↩</span><span class="rs-txt">这轮像是在回到旧话题「'+esc(sug.topic)+'」，是否恢复？</span>'+
+    '<button class="rs-yes" type="button">恢复</button><button class="rs-no" type="button">忽略</button>';
+  const decide=async(yes)=>{
+    try{ await api("POST", yes?"/api/topic/restore":"/api/topic/restore/dismiss",
+      {session:session, card_id:sug.card_id, turn:sug.turn}); }catch(e){}
+    el.remove(); scrollLog();
+    if (yes) toast("已恢复话题背景，下一条消息起生效");
+  };
+  el.querySelector(".rs-yes").onclick=()=>decide(true);
+  el.querySelector(".rs-no").onclick=()=>decide(false);
+  $("chatLog").appendChild(el); setEmpty(false); scrollLog();
+}
 function setAssistantText(el, text){
   const md = el.querySelector(".md"); md.innerHTML = renderMd(text);
   md.querySelectorAll("button[data-copy]").forEach(b=>{
@@ -1936,6 +1963,7 @@ function handleEvent(name, data){
           "（本次运行没有返回内容。请到「使用说明 → 最近一次运行诊断」查看退出码与原始输出，把里面的内容发我即可定位。）");
       }
       loadSessions();
+      maybeRecallSuggestion();   // P2b: show recall hint (never auto-restore)
       maybeSuggestMode();   // offer a stronger mode after several tool-ish turns
       break;
   }
