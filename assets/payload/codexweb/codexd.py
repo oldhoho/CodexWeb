@@ -782,13 +782,15 @@ def read_session_meta(sid):
             return {"pinned": bool(d.get("pinned")),
                     "group": str(d.get("group") or ""),
                     "title": str(d.get("title") or ""),
+                    "title_auto": bool(d.get("title_auto")),
                     "mode": mode,
                     "think": d.get("think") if isinstance(d.get("think"), bool) else None,
                     "search": d.get("search") if isinstance(d.get("search"), bool) else None,
                     TOOLS_STICKY_KEY: bool(d.get(TOOLS_STICKY_KEY))}
     except (OSError, ValueError):
         pass
-    return {"pinned": False, "group": "", "title": "", "mode": "chat",
+    return {"pinned": False, "group": "", "title": "", "title_auto": False,
+            "mode": "chat",
             "think": None, "search": None, TOOLS_STICKY_KEY: False}
 
 
@@ -796,9 +798,14 @@ def write_session_meta(sid, meta):
     p = meta_path(sid)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     cur = read_session_meta(sid)
+    # Any caller that sets a title explicitly (the frontend inline editor,
+    # /api/title, imports) but does not assert title_auto is a HUMAN edit:
+    # clear the auto flag so future compaction never overwrites it.
+    if "title" in (meta or {}) and "title_auto" not in (meta or {}):
+        cur["title_auto"] = False
     for k, v in (meta or {}).items():
-        if k not in ("pinned", "group", "title", "mode", "think", "search",
-                     TOOLS_STICKY_KEY):
+        if k not in ("pinned", "group", "title", "title_auto", "mode",
+                     "think", "search", TOOLS_STICKY_KEY):
             continue
         # null explicitly clears a per-session quick override.
         if k in ("think", "search") and v is None:
@@ -2546,15 +2553,13 @@ class Runner:
         job["events"].append(("end", res))
         job["q"].put(("end", res))
         save_context(job)
-        # Auto-title is deferred until the session reaches the memory-compact
-        # threshold (COMPACT_AFTER turns). Naming on the first "hello" was too
-        # early and produced meaningless titles; the list shows the raw first
-        # message until then, and a real title appears once there is enough
-        # conversation to summarise what the session is about.
+        # Name the session on the very first successful turn, using the user's
+        # own question (rule based, zero token). Longer sessions get a refresh
+        # at each compaction via retitle_on_compact(). Manual titles are safe:
+        # auto_title only fills empty/auto-generated ones.
         if read_caps().get("auto_title") and code == 0:
             try:
-                if len(list_context(job["sid"], limit=COMPACT_AFTER + 1)) >= COMPACT_AFTER:
-                    auto_title(job["sid"])
+                auto_title(job["sid"])
             except (OSError, Bad) as ex:
                 log("auto_title failed: %s" % scrub(str(ex)))
         log("codex %s exit=%s stopped=%s" % (job["sid"], code, stopped))
@@ -3032,24 +3037,67 @@ def _first_user_text(sid):
     return ""
 
 
+def _title_from_text(text, limit=24):
+    """Deterministic short title from a user message (no API call, zero token)."""
+    one = _WS_RE.sub(" ", str(text or "")).strip()
+    # strip common instruction wrappers the frontend may have added
+    one = re.sub(r"^\[[^\]]+\]\s*", "", one).strip()
+    title = one[:limit]
+    if len(one) > limit:
+        title += "…"
+    return title
+
+
 def auto_title(sid):
-    """Derive a short Chinese/ASCII title from the first user message.
-    Only fills an empty title, never overwrites a user-chosen one. Rule based
-    (no extra API call, zero token cost)."""
+    """Name a session from its FIRST user message, on the very first turn.
+
+    Only fills an empty title and only rewrites titles that were themselves
+    auto-generated (meta.title_auto). A title the user edited by hand is
+    never touched. Rule based: no extra API call, zero token cost. The title
+    lives in meta.json and never enters the request prefix, so renaming can
+    not disturb the cache.
+    """
     meta = read_session_meta(sid)
-    if meta.get("title"):
+    if meta.get("title") and not meta.get("title_auto"):
         return meta["title"]
     first = _first_user_text(sid)
     if not first:
-        return ""
-    title = _WS_RE.sub(" ", first).strip()
-    # strip common instruction wrappers the frontend may have added
-    title = re.sub(r"^\[[^\]]+\]\s*", "", title).strip()
-    title = title[:24]
-    if len(_WS_RE.sub(" ", first).strip()) > 24:
-        title += "…"
-    write_session_meta(sid, {"title": title})
+        return meta.get("title", "")
+    title = _title_from_text(first)
+    if not title:
+        return meta.get("title", "")
+    if title == meta.get("title"):
+        return title
+    write_session_meta(sid, {"title": title, "title_auto": True})
     log("auto title %s -> %s" % (sid, title))
+    return title
+
+
+def retitle_on_compact(sid):
+    """Refresh an AUTO title while a context compaction re-anchors.
+
+    Rules: never touch a user-authored title; if the auto title already
+    matches the newest substantive user question, do nothing. Rule based,
+    no LLM call -- compaction itself is deterministic too, so 'summarise
+    while compacting' costs zero tokens and stays byte-stable. Only meta.json
+    changes, never the cached prompt prefix.
+    """
+    meta = read_session_meta(sid)
+    if not meta.get("title_auto"):
+        return meta.get("title", "")
+    newest = ""
+    for t in reversed(list_context(sid, limit=400)):
+        u = str(t.get("user_input") or "").strip()
+        if u:
+            newest = u
+            break
+    if not newest:
+        return meta.get("title", "")
+    title = _title_from_text(newest)
+    if not title or title == meta.get("title"):
+        return meta.get("title", "")
+    write_session_meta(sid, {"title": title, "title_auto": True})
+    log("compact retitle %s -> %s" % (sid, title))
     return title
 
 
@@ -3160,6 +3208,14 @@ def write_compact_snap(sid, covered, text):
     write_private(compact_snap_path(sid),
                   json.dumps({"covered": covered, "text": text}, ensure_ascii=False))
     log("compact snapshot re-anchored %s -> %d turns" % (sid, covered))
+    # Compaction is the natural checkpoint to refresh an auto title: a long
+    # session's topic often drifts from the first question. Rule based (no
+    # LLM call) and meta-only, so neither the request prefix nor the cache is
+    # touched. User-edited titles carry no title_auto flag and are preserved.
+    try:
+        retitle_on_compact(sid)
+    except (OSError, Bad) as ex:
+        log("compact retitle failed: %s" % scrub(str(ex)))
 
 
 def summarize_turns(turns):
