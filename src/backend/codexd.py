@@ -143,6 +143,70 @@ SEC_RECORD_CONTRACT = (
     "没有值得记的内容就不要输出任何标记。"
 )
 
+# --- Automatic session management: LLM-emitted CTX marker + topic cards -----
+# Same "invisible trailing marker" pattern as the secretary LOG/NOTE contract,
+# but for context lifecycle: the model tags whether this turn opens a genuinely
+# NEW topic. Parsed, stripped from all visible/persisted/cached text, and used
+# by the (later) lifecycle step to archive topic cards + re-anchor the prefix.
+# P1 only parses + persists the marker; no archival/recall yet.
+CTX_OPEN, CTX_CLOSE = "⟦CTX⟧", "⟦/CTX⟧"
+CTX_ALLOWED_MODES = ("chat", "secretary")   # direct-call modes only in P1
+# Byte-stable: defined once, referenced by both the normal-mode prompt block
+# and the secretary frozen snapshot. Never build it from per-turn data.
+# Wording was empirically tuned against deepseek-flash and deepseek-v4-pro
+# (two live model probes, 7 turns each). The earlier soft phrasing — "不可见标记
+# （用户看不到，勿在正文提及）" — was read by BOTH models as "do not output this
+# marker" and produced 0/7 markers. The mandatory phrasing below ("必须输出、
+# 这是系统信号、给示例、无一例外") produced well-formed JSON markers on 7/7 with
+# markers retained in history. Keep this byte-stable: it is a module constant
+# shared by the normal-mode prompt block and the secretary frozen snapshot.
+# `recall` distinguishes "back to a previously-discussed topic" from a brand-new
+# topic so P3 can re-inject old topic cards; see _ctx_body_to_meta.
+CTX_CONTRACT = (
+    "【会话管理 · 必做】你必须在每次回复的最末尾，另起一行，原样输出下面这一行标记。"
+    "这是系统内部信号，用户界面会自动隐藏它，因此它绝不会打扰用户；"
+    "但如果你省略它，系统就无法工作。不要解释、不要在正文提到它，直接输出。\n"
+    "格式（严格照抄，topic 换成四到八字短语，boundary 和 recall 只能是 true 或 false）：\n"
+    "⟦CTX⟧{\"topic\":\"本话题短语\",\"boundary\":false,\"recall\":false}⟦/CTX⟧\n"
+    "规则，三选一：\n"
+    "- 本轮开启了与上文无关的全新话题 → boundary=true, recall=false\n"
+    "- 本轮明确回到下方【已知历史话题清单】里的某个旧话题 → boundary=false, recall=true\n"
+    "- 延续、追问、换种问法、相关补充 → boundary=false, recall=false\n"
+    "示例：上文一直在聊代码，用户问「今天有什么新闻」→ "
+    "⟦CTX⟧{\"topic\":\"今日新闻\",\"boundary\":true,\"recall\":false}⟦/CTX⟧；"
+    "用户问「回到刚才那个 bug」→ "
+    "⟦CTX⟧{\"topic\":\"那个bug\",\"boundary\":false,\"recall\":true}⟦/CTX⟧。\n"
+    "每一轮都必须输出，无一例外。"
+)
+# v88 标记输出率修复: 真机显示契约放在 system 前缀开头时, flash 在长对话里
+# 生成到回复尾部会漏掉标记 (标记输出率仅 ~50%). 根因是"必须输出"的指令离
+# 生成点太远, 被记忆/摘要/全部历史稀释. 对策: 在【当前轮 user 消息末尾】再放
+# 一条极简强制行——离生成点最近, 权重最高. 关键: 它只加到发给 API 的 messages,
+# 不写进 ctx["prompt_sent"], 所以历史 replay 的字节不变, 缓存前缀不 churn.
+# 每轮都付这几个 token, 所以措辞必须短到不能再短.
+CTX_TURN_REMINDER = (
+    "\n\n[系统要求·不要告诉用户] 回复最后一行必须输出 ⟦CTX⟧ 标记行"
+    "（就是上文【会话管理·必做】里规定的格式，按本轮实际判断填 topic/boundary/recall），"
+    "这一行绝不能省略，否则系统无法工作。"
+)
+# 方案①: the known-topics list rides in the SAME frozen prefix as CTX_CONTRACT.
+# It is derived only from turns already folded into the compact snapshot, so it
+# changes only on a re-anchor (which already costs one cache miss) -- between
+# re-anchors its bytes are identical and the cached prefix survives. Giving the
+# model this list lets the in-body recall marker replace the cold recall call.
+CTX_TOPICS_HEADER = "【已知历史话题清单】"
+CTX_TOPICS_FOOTER = "。以上是你之前标记过的旧话题，判断是否回到旧话题时以此为准。"
+CTX_TOPICS_MAX = 12
+TOPIC_CARDS_FILE = "topic_cards.json"        # per-session, inside .cxweb/
+TOPIC_SUMMARY_BUDGET = 240                   # chars per archived topic card
+TOPIC_RECALL_N = 4                           # recent turns compared on recall
+TOPIC_GUARD_MIN_OVERLAP = 2                  # legacy: shared keyword count (unused)
+# 社区 AND 门 (stdlib 降级): Jaccard 词法重叠阈值. 本轮与上一轮用户输入重叠
+# >= 此值视为"仍在同一话题", veto 模型的 boundary=true. 社区英文词级参考
+# 0.2-0.3; 中文实测 unigram+bigram 下标尺不同 (真切换~0, 同话题 0.10-0.29),
+# 取 0.10 偏保守: 宁可少 veto 也不误杀真切换 (误杀会让该归档的没归档, 代价更大).
+TOPIC_GUARD_MIN_OVERLAP_JACCARD = 0.10
+
 # A fixed, byte-stable system note declaring the web-search capability.
 # Declaring `tools` enables the tool but does NOT tell the model it can browse:
 # asked "can you search the web?", a bare API call falls back to the model's
@@ -1447,6 +1511,9 @@ def save_context(job):
             "reasoning": _turn_reasoning(job["events"])[:REASONING_REPLAY_BUDGET],
             "usage": parse_usage(job["events"]),
             "result": job.get("result") or {},
+            # Parsed ⟦CTX⟧ directive (topic + boundary). Persisted for the
+            # review page and the (P2) lifecycle step; never sent to the API.
+            "ctx_meta": ctx.get("ctx_meta"),
         }
         # scrub() strips anything that looks like a key before it hits disk.
         text = json.dumps(rec, ensure_ascii=False)
@@ -1455,6 +1522,37 @@ def save_context(job):
         with open(tmp, "wb") as f:
             f.write(text.encode("utf-8"))
         os.replace(tmp, os.path.join(d, job["id"] + ".json"))
+        # Observe the CTX signal after the turn is safely persisted. P1 only
+        # logs; the hook is the single seam P2 will use to archive/re-anchor.
+        meta = ctx.get("ctx_meta")
+        if meta is not None:
+            try:
+                apply_topic_lifecycle(job["sid"], meta,
+                                      ctx.get("user_input", "") or job.get("prompt", ""),
+                                      job["id"])
+            except (OSError, ValueError, TypeError):
+                pass
+            # 方案①+②: recall's in-body marker is stabilised by the frozen
+            # known-topics list in the cached prefix. The independent cold LLM
+            # call (~600 uncached tokens) runs ONLY when an explicit "go back
+            # to an old topic" trigger word is present -- not on every continue
+            # turn. Both hit and miss are logged so the offline backtest can
+            # measure trigger recall and judge accuracy before P2 goes live.
+            if RECALL_JUDGE_FALLBACK and not bool(meta.get("boundary")):
+                user_text = ctx.get("user_input", "")
+                trigger = recall_trigger_match(user_text)
+                if trigger:
+                    log("recall trigger HIT sid=%s turn=%s word=%s -> judge"
+                        % (job["sid"], job["id"], scrub(trigger)))
+                    try:
+                        judge_recall_async(
+                            job["sid"], os.path.join(d, job["id"] + ".json"),
+                            meta, user_text, meta.get("topic", ""), job["id"])
+                    except (OSError, ValueError, TypeError):
+                        pass
+                else:
+                    log("recall trigger MISS sid=%s turn=%s (skip judge)"
+                        % (job["sid"], job["id"]))
     except (OSError, ValueError, TypeError):
         pass
 
@@ -1778,7 +1876,10 @@ class Runner:
         # The snapshot is seeded once on the session's first assistant turn;
         # later edits/compiles never change these bytes, so the cached prefix
         # survives profile maintenance. Only a new session picks up updates.
-        is_secretary = str(job.get("ctx", {}).get("mode") or "") == "secretary"
+        ctx_mode_now = str(job.get("ctx", {}).get("mode") or "")
+        is_secretary = ctx_mode_now == "secretary"
+        # Direct-chat modes that carry the CTX lifecycle contract (P1).
+        ctx_managed = ctx_mode_now in CTX_ALLOWED_MODES
         if is_secretary:
             ctx["system_prompt"] = sec_session_prompt(job["sid"])
         # tools stickiness is still needed: declaring the web-search schema
@@ -1804,10 +1905,15 @@ class Runner:
         # ALWAYS build history: caps only control memory/summary blocks, never
         # whether prior turns are replayed. Skipping history when both caps
         # were off used to make every turn a brand-new conversation.
+        # Secretary carries CTX_CONTRACT in its frozen snapshot; normal chat
+        # gets it injected here. Both are byte-stable. Other modes (via codex
+        # CLI) are out of scope for P1 and get no contract.
+        want_ctx_contract = ctx_managed and not is_secretary
         messages, parts, ctxinfo = build_cacheable_context(
             sid, caps, with_reminder=use_reminder,
             system_prompt=str(ctx.get("system_prompt") or ""),
-            instructions=instr_lines, web_search_capable=tools_on)
+            instructions=instr_lines, web_search_capable=tools_on,
+            ctx_contract=want_ctx_contract)
         # Record injections so the review view stays honest.
         inj = ctx.setdefault("injections", [])
         for p in parts:
@@ -1819,7 +1925,13 @@ class Runner:
             rm = reminder_msg(ctx.get("ts"))
             if rm and rm["content"] != ctxinfo.get("last_reminder"):
                 messages.append(rm)
-        messages.append({"role": "user", "content": job["prompt"]})
+        # v88: for managed modes, put the marker demand at the END of the current
+        # user message -- nearest to generation, so flash stops dropping the
+        # trailing ⟦CTX⟧ line in long conversations. CRITICAL: append only to the
+        # outgoing message; ctx["prompt_sent"] (set above) stays the pure user
+        # text so later turns replay identical bytes and the cached prefix holds.
+        messages.append({"role": "user", "content":
+                         compose_sent_prompt(job["prompt"], ctx_managed)})
         # Pre-flight total input cap: the sum of system/enrichment/history/user
         # must stay bounded. recent_history already enforces its own budget, but
         # this is the last line of defence against a poisoned/pasted mega-prompt
@@ -1961,6 +2073,10 @@ class Runner:
                         shown = "".join(full)
                         if is_secretary:
                             shown = sec_parse_markers(shown)[0]
+                        # Hide ⟦CTX⟧ mid-stream too, for every managed mode,
+                        # so the trailing directive never flashes in the UI.
+                        if ctx_managed:
+                            shown = ctx_parse_marker(shown)[0]
                         self.emit(job, "stream", {"text": shown})
                         self.diag = {"status": "运行中（纯对话流式输出 %d 字）" % len("".join(full)),
                                      "phase": "streaming", "id": job["id"],
@@ -1990,6 +2106,15 @@ class Runner:
                 sec_append_log(entry)
             for entry in sec_notes:
                 sec_append_note(entry)
+        # Strip the invisible ⟦CTX⟧ directive for every managed mode so it
+        # never enters the persisted assistant_msg / cached prefix. Keep the
+        # parsed meta on ctx for save_context() to persist as ctx_meta.
+        if ctx_managed:
+            text, ctx_meta = ctx_parse_marker(text)
+            if ctx_meta is not None:
+                ctx["ctx_meta"] = ctx_meta
+                log("ctx marker %s topic=%s boundary=%s"
+                    % (job["sid"], ctx_meta.get("topic"), ctx_meta.get("boundary")))
         # Store the exact assistant message for later turns. No strip(): the
         # model's own trailing newline is part of the persisted cache unit.
         amsg = {"content": text}
@@ -2735,6 +2860,77 @@ def sec_worklog_path(ts=None):
     return os.path.join(SEC_WORKLOG_DIR, day + ".md")
 
 
+def _ctx_body_to_meta(body):
+    """Leniently turn a ⟦CTX⟧ body into
+    {"topic": str, "boundary": bool, "recall": bool}.
+    Never raises: a malformed marker must not block save_context."""
+    body = str(body or "").strip()
+    if not body:
+        return None
+    # 容错：flash 偶发用单个 ⟧ 收尾（而不是 ⟦/CTX⟧），或把整段 JSON 塞进
+    # topic 值里。先裁掉首尾杂散闭合符，再尝试 JSON；这样
+    # '{"topic":"X","boundary":true,"recall":false}⟧' 也能正常解析。
+    body = body.strip("⟧⟦ \t\r\n")
+    try:
+        d = json.loads(body)
+        if isinstance(d, dict):
+            topic = str(d.get("topic") or "").strip()[:60]
+            b = d.get("boundary")
+            if isinstance(b, str):
+                b = b.strip().lower() in ("true", "1", "yes")
+            r = d.get("recall")
+            if isinstance(r, str):
+                r = r.strip().lower() in ("true", "1", "yes")
+            return {"topic": topic, "boundary": bool(b), "recall": bool(r)}
+    except (ValueError, TypeError):
+        pass
+    # Degrade: salvage a topic string for display, but BOTH boundary and recall
+    # MUST default to false on malformed JSON. A false-positive boundary triggers
+    # archival + re-anchor (one cache miss), and recall triggers card re-injection;
+    # an ambiguous marker must stay conservative on both.
+    # 优先匹配带引号的键和值 "topic":"..."（键名可能被半截 JSON 的引号包裹），
+    # 再退回无引号的 topic:...。
+    m = re.search(r"[\"']?\s*topic[\"']?\s*[:：]\s*\"([^\"]+)\"", body) or \
+        re.search(r"[\"']?\s*topic[\"']?\s*[:：]\s*([^\"',，}\]]+)", body)
+    topic = (m.group(1).strip() if m else body).strip("\"' ")[:60]
+    return {"topic": topic, "boundary": False, "recall": False}
+
+
+def ctx_parse_marker(text):
+    """Extract ⟦CTX⟧{...}⟦/CTX⟧ from an assistant reply.
+    Returns (clean_text, meta). meta is None when there was no marker, else a
+    dict {"topic": str, "boundary": bool, "recall": bool}. The marker -- and any prose around
+    it -- is stripped so it never reaches the UI, the persisted assistant_msg,
+    or the cached prefix. Unclosed openers are dropped from the opener on
+    (a stopped stream must not leak a raw directive). No marker => text is
+    returned BYTE-UNCHANGED (no rstrip): shaving a trailing newline would alter
+    the persisted cache unit that later turns replay verbatim."""
+    text = str(text or "")
+    meta_box = [None]
+
+    def harvest(m):
+        if meta_box[0] is None:
+            meta_box[0] = _ctx_body_to_meta(m.group(1))
+        return ""
+
+    try:
+        pattern = re.compile(re.escape(CTX_OPEN) + r"(.*?)" + re.escape(CTX_CLOSE), re.S)
+        text = pattern.sub(harvest, text)
+    except re.error:
+        pass
+    # Unclosed opener at the tail (e.g. stream stopped mid-marker).
+    idx = text.rfind(CTX_OPEN)
+    if idx >= 0 and CTX_CLOSE not in text[idx:]:
+        if meta_box[0] is None:
+            meta_box[0] = _ctx_body_to_meta(text[idx + len(CTX_OPEN):])
+        text = text[:idx]
+
+    meta = meta_box[0]
+    if meta is None:
+        return text, None
+    return text.rstrip(), meta
+
+
 def sec_parse_markers(text):
     """Extract ⟦LOG⟧...⟦/LOG⟧ and ⟦NOTE⟧...⟦/NOTE⟧ blocks from an assistant
     reply. Returns (clean_text, logs, notes). The markers -- and everything
@@ -2853,6 +3049,10 @@ def sec_system_prompt():
         blocks.append("【关于用户 · human】\n" + human)
     blocks.append("你是用户的私人助手：可靠、克制、有分寸；不确定就明说，绝不编造记忆。")
     blocks.append(SEC_RECORD_CONTRACT.strip())
+    # CTX contract joins the SESSION-FROZEN snapshot: only brand-new secretary
+    # sessions get it. Existing sessions keep their exact old bytes so their
+    # cached prefix is not invalidated by this upgrade.
+    blocks.append(CTX_CONTRACT.strip())
     return "\n\n".join(blocks)
 
 
@@ -3191,6 +3391,324 @@ def compact_snap_path(sid):
     return os.path.join(session_path(sid), CTX_DIR, COMPACT_SNAP_FILE)
 
 
+def topic_cards_path(sid):
+    return os.path.join(session_path(sid), CTX_DIR, TOPIC_CARDS_FILE)
+
+
+def read_topic_cards(sid):
+    """Read the session's topic-card index. Lazily seeded from the current
+    compact snapshot on first use so pre-upgrade sessions get one active card
+    without any migration write. Shape:
+      {"cards": [{"id","title","status","started_turn","covered_turn",
+                  "summary","entities"}], "next_id": int}
+    `started_turn` = first turn index of the topic; `covered_turn` = last turn
+    index whose content is folded into this card. `covered_turn < reanchor`
+    is the recall filter for archived cards."""
+    try:
+        with open(topic_cards_path(sid), encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d.get("cards"), list) and isinstance(d.get("next_id"), int):
+            return d
+    except (OSError, ValueError, TypeError, Bad):
+        pass
+    snap = read_compact_snap(sid)
+    return {
+        "cards": [{
+            "id": "t1", "title": "", "status": "active",
+            "started_turn": int(snap.get("covered", 0)),
+            "covered_turn": int(snap.get("covered", 0)),
+            "summary": "", "entities": [],
+        }],
+        "next_id": 2,
+    }
+
+
+def write_topic_cards(sid, data):
+    write_private(topic_cards_path(sid),
+                  json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _lex_tokens(text):
+    """stdlib-only lexer for Jaccard boundary guard. CJK has no spaces, so we
+    use BOTH single chars (unigram) and adjacent pairs (bigram) per CJK run;
+    ASCII words/numbers are kept whole. Calibration showed bigram-only is too
+    sparse on short Chinese turns (real switches and same-topic both ~0), while
+    unigram+bigram separates them (real switch ~0, same-topic 0.10-0.29).
+    No dependency, deterministic."""
+    s = str(text or "").lower()
+    toks = set()
+    cjk_run = []
+    ascii_run = []
+
+    def flush_ascii():
+        if ascii_run:
+            toks.add("".join(ascii_run))
+            del ascii_run[:]
+
+    def flush_cjk():
+        if cjk_run:
+            toks.update(cjk_run)                       # unigram
+            for i in range(len(cjk_run) - 1):
+                toks.add(cjk_run[i] + cjk_run[i + 1])  # bigram
+            del cjk_run[:]
+
+    for ch in s:
+        if "\u4e00" <= ch <= "\u9fff":
+            flush_ascii()
+            cjk_run.append(ch)
+        elif ch.isalnum() or ch == "_":
+            flush_cjk()
+            ascii_run.append(ch)
+        else:
+            flush_ascii()
+            flush_cjk()
+    flush_ascii()
+    flush_cjk()
+    return toks
+
+
+def jaccard_overlap(a, b):
+    """Token-set Jaccard in [0,1]. Empty on either side -> 0 (no evidence of
+    'same topic', so a boundary marker is not vetoed). Pure, never raises."""
+    try:
+        ta, tb = _lex_tokens(a), _lex_tokens(b)
+    except (TypeError, ValueError):
+        return 0.0
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / float(len(ta | tb))
+
+
+def boundary_guard(sid, user_input, current_turn_id=None):
+    """社区 AND 门 (stdlib 降级版): compare this turn's user input with the
+    previous turn's. Returns (overlap, veto) where veto=True means 'boundary
+    marker should be ignored because the two turns are lexically the same
+    topic'. `overlap=None` when there is no previous turn (no evidence)."""
+    try:
+        turns = list_context(sid, limit=3)
+    except (OSError, ValueError, TypeError, Bad):
+        return None, False
+    prev = None
+    for t in turns:
+        if current_turn_id is not None and str(t.get("id") or "") == str(current_turn_id):
+            continue
+        prev = t
+        break
+    if prev is None:
+        return None, False
+    prev_text = (str(prev.get("prompt_sent") or prev.get("effective_prompt")
+                     or prev.get("user_input") or ""))
+    overlap = jaccard_overlap(user_input, prev_text)
+    veto = overlap >= TOPIC_GUARD_MIN_OVERLAP_JACCARD
+    return overlap, veto
+
+
+def apply_topic_lifecycle(sid, ctx_meta, user_input="", current_turn_id=None):
+    """P1 HOOK: observe only. Logs the boundary signal but does NOT archive,
+    re-anchor, fold, or recall. Kept as a single funnel so P2 can turn on the
+    real lifecycle without touching call sites. Returns a small observation
+    dict for tests/diagnostics. Never raises.
+
+    `user_input`/`current_turn_id` feed the AND-guard: even if the model says
+    boundary=true, a high lexical overlap with the previous turn vetoes it.
+    P1 records the veto but does not act on it."""
+    obs = {"boundary": False, "recall": False, "topic": "", "action": "observe",
+           "boundary_veto": False, "overlap": None}
+    try:
+        try:
+            turn_count = len(list_context(sid))
+        except (OSError, ValueError, TypeError, Bad):
+            turn_count = 0
+        meta = ctx_meta or {}
+        topic = str(meta.get("topic") or "")[:60]
+        boundary = bool(meta.get("boundary"))
+        recall = bool(meta.get("recall"))
+        obs.update({"boundary": boundary, "recall": recall, "topic": topic})
+        cards = read_topic_cards(sid)
+        active = next((c for c in cards["cards"] if c.get("status") == "active"), None)
+        # AND 门: a boundary marker alone is not trusted on flash (probe showed
+        # false boundary=true on continued topics). Cross-check with cheap
+        # lexical overlap against the previous turn -- system-side, zero LLM.
+        boundary_veto = False
+        overlap = None
+        if boundary and user_input:
+            overlap, boundary_veto = boundary_guard(sid, user_input, current_turn_id)
+            obs["overlap"] = round(overlap, 3) if overlap is not None else None
+            obs["boundary_veto"] = bool(boundary_veto)
+        # Effective boundary = model said switch AND lexical signal agrees.
+        eff_boundary = bool(boundary and not boundary_veto)
+        obs["boundary_effective"] = eff_boundary
+
+        if eff_boundary or recall:
+            # P2 will: archive `active` with started/covered turns, merge its
+            # summary into compact_snap, reset the tail anchor, and create a
+            # new active card. For recall, P3 re-injects 1-2 matching archived
+            # cards at the re-anchor point. P1 only records the decision.
+            log("ctx lifecycle OBSERVE %s sid=%s topic=%s "
+                "active=%s turns=%d overlap=%s (no archival in P1)"
+                % ("boundary=true" if eff_boundary else "recall=true",
+                   sid, topic, active.get("id") if active else None, turn_count,
+                   ("%.2f" % overlap) if overlap is not None else "-"))
+            obs["action"] = "would_archive" if eff_boundary else "would_recall"
+        elif boundary and boundary_veto:
+            # Model said new topic, but lexically it is the same conversation.
+            # Vetoed -> treat as continue. This is the AND gate doing its job.
+            log("ctx boundary VETO sid=%s topic=%s overlap=%.2f>=%.2f "
+                "-> treat as continue (no archival in P1)"
+                % (sid, topic, overlap or 0.0, TOPIC_GUARD_MIN_OVERLAP_JACCARD))
+            obs["action"] = "boundary_vetoed"
+        else:
+            log("ctx lifecycle OBSERVE continue sid=%s topic=%s turns=%d"
+                % (sid, topic, turn_count))
+    except Exception as ex:
+        log("ctx lifecycle observe failed: %s" % scrub(str(ex)))
+    return obs
+
+
+# ---- Independent recall decision (not tied to the in-body ⟦CTX⟧ marker) ----
+# Live probes showed the model reliably emits boundary in the marker but often
+# OMITS it on "back to an old topic" turns (the marker is stripped before the
+# next turn, so the model has no in-context example). Recall therefore uses a
+# dedicated, non-streaming call with a strict prompt, run in a daemon thread
+# AFTER the reply is already delivered -- it never blocks the user.
+RECALL_PROMPT = (
+    "你是会话管理器。判断【本轮用户消息】是否表示“回到之前讨论过的旧话题”。\n"
+    "旧话题列表：{topics}\n"
+    "本轮用户消息：{user}\n"
+    "规则：只有当用户明确表示要回到某个旧话题（如“回到刚才的X”“之前说的X继续”“还是那个X”）才判 true；"
+    "普通追问、延续当前话题、全新话题都判 false。\n"
+    "只输出一行 JSON，不要任何解释：{{\"recall\":true/false,\"topic\":\"匹配到的旧话题短语或本轮话题\"}}"
+)
+RECALL_TIMEOUT = 20            # seconds; a slow/failed call just yields false
+# 方案② (①+② combo): the independent recall judge is EXPENSIVE (~600 uncached
+# tokens), so it only runs when the user's message carries an explicit
+# "return to an old topic" signal. RFC: the in-body marker alone proved
+# unreliable in the flash probe (BACK-correct ~33%). Gating on trigger words
+# keeps ~95% of turns at zero extra cost while still catching the turns where
+# recall actually matters. Set False to disable the call entirely.
+RECALL_JUDGE_FALLBACK = True
+
+# Trigger phrases that indicate "go back to a previously discussed topic".
+# Each entry is a regex alternative; we log which one matched. Kept deliberately
+# explicit to avoid burning a call on ordinary "继续"/"再说" continuations.
+RECALL_TRIGGER_RE = re.compile(
+    r"回到(刚才|之前|前面|上面|先前|那个|那个话题|刚才那个)"
+    r"|返回(刚才|之前|前面|上面|先前|那个)"
+    r"|(之前|刚才|前面|上面|先前)(说的|聊的|提到|讨论|那个|那个话题|的话题)"
+    r"|还是(刚才|之前|前面|上面|先前)?那个"
+    r"|接着(刚才|之前|前面|上面|先前)(那个|聊|说|讨论)"
+    r"|继续(刚才|之前|前面|上面|先前)(那个|聊|说|讨论|的话题)"
+    r"|(我们|咱)(刚才|之前|前面)(聊|说|讨论|提)过"
+    r"|话说回来|言归正传|回到刚才"
+    r"|back\s+to\s+(the|that|our)\b"
+    r"|as\s+(we|i)\s+(said|discussed)\s+(before|earlier)"
+    , re.I)
+
+
+def recall_trigger_match(user_input):
+    """Return the matched trigger phrase (for logging) or '' when the message
+    shows no explicit 'return to old topic' signal. Pure, never raises."""
+    try:
+        m = RECALL_TRIGGER_RE.search(str(user_input or ""))
+        return m.group(0) if m else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+def _recent_topics(sid, exclude_id, limit=12):
+    """Distinct topic labels from already-persisted older turns, newest last.
+    Inputs for the recall judge; never sent into the model's cached prefix."""
+    try:
+        turns = list_context(sid, limit=limit + 4)
+    except (OSError, ValueError, TypeError, Bad):
+        return []
+    out = []
+    for r in turns:
+        if str(r.get("id") or "") == str(exclude_id):
+            continue
+        meta = r.get("ctx_meta")
+        if not isinstance(meta, dict):
+            continue
+        topic = str(meta.get("topic") or "").strip()
+        # Ignore empty / marker-noise topics and de-duplicate (case-insensitive).
+        if not topic or len(topic) > 40:
+            continue
+        if any(topic.lower() == t.lower() for t in out):
+            continue
+        out.append(topic)
+    return out[-limit:]
+
+
+def judge_recall(sid, user_input, current_topic, exclude_id):
+    """Synchronous independent recall decision. Returns a meta dict or None.
+    Never raises: any failure degrades to recall=false so the lifecycle stays
+    conservative. The current turn's own (possibly missing) marker is ignored."""
+    try:
+        topics = _recent_topics(sid, exclude_id)
+        if not topics:
+            return None                      # no old topic to return to
+        prompt = RECALL_PROMPT.format(
+            topics="、".join(topics),
+            user=str(user_input or "")[:300].replace("\n", " "),
+        )
+        text, _usage = direct_chat(
+            [{"role": "user", "content": prompt}],
+            timeout=RECALL_TIMEOUT, think=False)
+        s = str(text or "").strip()
+        # Tolerate ``` fences and stray prose, like parse_device_plan does.
+        if "```" in s:
+            s = re.sub(r"^.*?```(?:json)?\s*", "", s, flags=re.S)
+            s = re.sub(r"\s*```.*$", "", s, flags=re.S)
+        start, end = s.find("{"), s.rfind("}")
+        d = json.loads(s[start:end + 1]) if 0 <= start < end else {}
+        recall = d.get("recall")
+        if isinstance(recall, str):
+            recall = recall.strip().lower() in ("true", "1", "yes")
+        topic = str(d.get("topic") or current_topic or "").strip()[:60]
+        return {"topic": topic, "recall": bool(recall)}
+    except Exception as ex:
+        log("recall judge failed: %s" % scrub(str(ex))[:200])
+        return None
+
+
+def judge_recall_async(sid, turn_path, ctx_meta, user_input, current_topic, turn_id):
+    """Run the independent recall judge off the reply path, then merge its
+    verdict into the already-persisted turn record (recall only; boundary from
+    the in-body marker is authoritative) and re-run the observe-only lifecycle
+    hook so the recall decision is visible in logs exactly once."""
+    def work():
+        try:
+            verdict = judge_recall(sid, user_input, current_topic, turn_id)
+            # Unified verdict log for the offline backtest (true/false/failed
+            # all recorded). Pairs with "recall trigger HIT ... turn=<id>".
+            # No raw user text is logged -- only sid/turn/decision/topic.
+            v_recall = bool(verdict and verdict.get("recall"))
+            log("recall verdict sid=%s turn=%s decision=%s"
+                % (sid, turn_id, "true" if v_recall else "false"))
+            if not v_recall:
+                return
+            # Re-read the record so we never clobber a concurrent write.
+            with open(turn_path, encoding="utf-8") as f:
+                rec = json.load(f)
+            meta = dict(rec.get("ctx_meta") or {})
+            meta["recall"] = True
+            # Keep the judge's topic only when the in-body marker had none;
+            # the marker's topic is the authoritative in-context label.
+            if not str(meta.get("topic") or "").strip():
+                meta["topic"] = verdict.get("topic") or ""
+            rec["ctx_meta"] = meta
+            write_private(turn_path, json.dumps(rec, ensure_ascii=False))
+            log("ctx recall judge sid=%s topic=%s (independent call)"
+                % (sid, meta.get("topic")))
+            try:
+                apply_topic_lifecycle(sid, meta, user_input, turn_id)
+            except (OSError, ValueError, TypeError):
+                pass
+        except Exception as ex:
+            log("recall merge failed: %s" % scrub(str(ex))[:200])
+    threading.Thread(target=work, daemon=True).start()
+
+
 def read_compact_snap(sid):
     """Read the frozen summary anchor: {"covered": N, "text": "..."}.
     `covered` = how many oldest turns are already folded into `text`."""
@@ -3342,7 +3860,8 @@ def compact_replay_tools(value):
 
 
 def build_cacheable_context(sid, caps, with_reminder=False, system_prompt="",
-                            instructions=None, web_search_capable=False):
+                            instructions=None, web_search_capable=False,
+                            ctx_contract=False):
     """Assemble pure-chat messages with a STABLE PREFIX so provider-side
     context caching actually hits (DeepSeek charges ~1/10 for cache hits).
 
@@ -3371,7 +3890,14 @@ def build_cacheable_context(sid, caps, with_reminder=False, system_prompt="",
     parts = []
     blocks = []
 
-    # 0) Mode-carried system prompt: the FIRST message, frozen across turns.
+    # 0-pre) CTX contract for normal direct-chat modes. A constant string at a
+    # fixed position (always first) -> byte-stable across turns, so the cached
+    # prefix survives. Secretary already carries it inside its frozen snapshot
+    # (ctx_contract=False there) and must NOT inject it twice.
+    if ctx_contract:
+        blocks.append(CTX_CONTRACT.strip())
+        parts.append("会话管理契约")
+    # 0) Mode-carried system prompt, frozen across turns.
     sp = str(system_prompt or "").strip()
     if sp:
         blocks.append(sp)
@@ -3447,6 +3973,17 @@ def build_cacheable_context(sid, caps, with_reminder=False, system_prompt="",
             blocks.append("[历史对话摘要 · 已压缩]\n" + summary)
             parts.append("历史对话摘要（冻结锚点 · 前 %d 轮）" % covered)
 
+    # 2b) 方案①: known-old-topics list for the in-body recall marker. Derived
+    # ONLY from turns[:covered] (the frozen, already-summarised prefix), so its
+    # bytes are identical across turns until the next compact re-anchor -- the
+    # same event that already costs one cache miss. Placed at a fixed position
+    # right after the summary block so it never churns the cached prefix.
+    if ctx_contract and caps.get("compact"):
+        known = known_topics_block(sid, turns, covered)
+        if known:
+            blocks.append(known)
+            parts.append("已知历史话题清单（冻结锚点 · recall 判定用）")
+
     # 3) Raw turns after the anchor, in chronological order. This tail grows by
     #    append only: turn N's list == turn N-1's list + the newest pair.
     raw_turns = turns[covered:]
@@ -3506,6 +4043,49 @@ def build_cacheable_context(sid, caps, with_reminder=False, system_prompt="",
             "exact_user_replay": True, "tool_replay": tool_replay,
             "last_reminder": previous_reminder}
     return messages, parts, info
+
+
+def compose_sent_prompt(user_prompt, ctx_managed):
+    """v88: the text actually sent as the current user message. For managed
+    modes we append a short marker demand at the END (nearest to generation),
+    which fixes flash dropping the trailing ⟦CTX⟧ line in long chats. Pure
+    function so tests can assert the exact bytes. The caller stores the ORIGINAL
+    user_prompt in ctx['prompt_sent'], so history replay stays byte-identical
+    and the cached prefix never churns."""
+    if not ctx_managed:
+        return user_prompt
+    return str(user_prompt or "") + CTX_TURN_REMINDER
+
+
+def known_topics_block(sid, turns, covered):
+    """方案①: build the frozen 'known old topics' list from topics already
+    folded into the compact snapshot. Only turns[:covered] are used, and
+    `covered` advances solely on a compact re-anchor -- so between re-anchors
+    the returned block is byte-identical and the cached prefix survives. The
+    list is de-duplicated case-insensitively, newest last, capped at 12.
+
+    This must stay a PURE function of (turns[:covered]) bytes: never read the
+    current turn's marker or any live state, or the prefix would churn every
+    turn and kill the cache hit that makes方案① cheap.
+    """
+    try:
+        frozen = turns[:covered]
+    except (TypeError, ValueError):
+        frozen = []
+    out = []
+    for t in frozen:
+        meta = t.get("ctx_meta") if isinstance(t, dict) else None
+        if not isinstance(meta, dict):
+            continue
+        topic = str(meta.get("topic") or "").strip()
+        if not topic or len(topic) > 40:
+            continue
+        if any(topic.lower() == x.lower() for x in out):
+            continue
+        out.append(topic)
+    if not out:
+        return ""
+    return CTX_TOPICS_HEADER + "、".join(out[-CTX_TOPICS_MAX:]) + CTX_TOPICS_FOOTER
 
 
 def build_enrichment(sid, caps=None):
@@ -4080,7 +4660,11 @@ def _export_log_tail():
 
 
 def _export_version():
-    paths = [os.path.join(os.path.dirname(UI_DIR.rstrip("/")), ".payload-version"),
+    # v88 fix: the old .payload-version file is stale (stuck at 78). The build
+    # stamps src/version into payload/VERSION, which lands at /codexweb/VERSION
+    # at runtime -- prefer that, keep the legacy paths as fallback.
+    paths = ["/codexweb/VERSION",
+             os.path.join(os.path.dirname(UI_DIR.rstrip("/")), ".payload-version"),
              "/codexweb/.payload-version"]
     for p in paths:
         try:

@@ -1435,7 +1435,32 @@ function renderMd(src){
 
 /* ---------- chat ---------- */
 function setEmpty(v){ $("view-chat").classList.toggle("empty", v); }
-function scrollLog(){ const c=$("content"); c.scrollTop = c.scrollHeight; }
+/* 流式粘性跟随：用户贴底时才自动滚，上翻查看历史时不打扰（两端一致）。
+   - scroll 事件感知用户位置；wheel/touchstart 立即失焦，不等下一个 token。
+   - 发送/切会话等主动场景传 force=true 强制贴底。 */
+let stickToBottom = true;
+function isNearBottom(c, threshold){
+  threshold = threshold || 80;
+  return c.scrollHeight - c.scrollTop - c.clientHeight <= threshold;
+}
+function scrollLog(force){
+  const c = $("content");
+  if (force || stickToBottom) c.scrollTop = c.scrollHeight;
+}
+(function bindScrollFollow(){
+  const c = $("content");
+  if (!c) return;
+  c.addEventListener("scroll", ()=>{ stickToBottom = isNearBottom(c); }, {passive:true});
+  c.addEventListener("wheel", ()=>{ stickToBottom = false; }, {passive:true});
+  // touchstart 不直接失焦（轻点输入框也会触发，误伤跟随）；只在真正拖动超过
+  // 阈值时失焦，等价于 PC 端的滚轮打断。
+  let touchY = null;
+  c.addEventListener("touchstart", e=>{ touchY = e.touches[0] ? e.touches[0].clientY : null; }, {passive:true});
+  c.addEventListener("touchmove", e=>{
+    const y = e.touches[0] ? e.touches[0].clientY : null;
+    if (touchY !== null && y !== null && Math.abs(y - touchY) > 8) stickToBottom = false;
+  }, {passive:true});
+})();
 function msgText(el){
   const n=el.querySelector(".bubble,.md");
   return String((n && n.innerText) || el.textContent || "").trim();
@@ -2449,6 +2474,7 @@ async function send(){
   if (hasAttach){ pendingAttachments=[]; renderAttachments(); }
   $("prompt").value=""; autoGrow();
   addUser(wire, r.job, attachChips);
+  scrollLog(true);   // 主动发送必须贴底看到自己的消息，不受 stickToBottom 影响
   startRunMeter();
   const wait = addAssistant(r.job); currentAssistant = wait; const dots=document.createElement("div");
   dots.className="waiting"; dots.innerHTML="<i></i><i></i><i></i>"; wait.appendChild(dots);
@@ -2821,7 +2847,7 @@ function renderSessionHistory(turns){
       }
     }
   });
-  setEmpty(!(turns||[]).length); scrollLog();
+  setEmpty(!(turns||[]).length); scrollLog(true);   // 切换/加载会话强制贴底
 }
 async function loadSessionHistory(id, focusHit){
   histPollSig=null;   // content just refreshed; re-baseline the cheap poll
